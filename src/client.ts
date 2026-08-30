@@ -120,9 +120,11 @@ export interface DescribeClientConfig {
   /**
    * Your product's name, appended to the `User-Agent` as `(+name)`.
    *
-   * Strongly recommended and free: the 20 rps ceiling is shared across the
+   * Strongly recommended and free: the rate limit is shared across the
    * ecosystem with no per-partner bucket, and the UA is the only thing that
-   * makes your share of it attributable when something gets loud.
+   * makes your share of it attributable when something gets loud. The ceiling
+   * itself is not typed here — the `RateLimit-Policy` response header is the
+   * authority (see the correction in `config.ts`).
    */
   product?: string;
   /**

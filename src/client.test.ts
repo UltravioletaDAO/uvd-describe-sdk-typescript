@@ -229,7 +229,7 @@ describe('R5 — failOpen is observable', () => {
     expect(onFailure).not.toHaveBeenCalled();
   });
 
-  it('429 (the shared 20 rps) is covered by failOpen and marked transient', async () => {
+  it('429 (the shared rate limit) is covered by failOpen and marked transient', async () => {
     const server = mockServer({ '/health': { status: 429, body: {} } });
     const seen: DescribeFailure[] = [];
     const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });

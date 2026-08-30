@@ -42,9 +42,14 @@ const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !
  * `null` in, `null` out. The single most load-bearing line of this file.
  *
  * A missing score is `null`; a present score is a number. There is no third
- * branch, and in particular there is no branch that produces `0` — see
- * `parse.test.ts`, which mounts the bad state (a `|| 0` coalesce) and proves
- * the test goes red for it.
+ * branch, and in particular there is no branch that produces `0`.
+ *
+ * Verified discriminant on 2026-08-30 by mounting the bad state: replacing the
+ * body below with `Number(v ?? 0)` turns three tests in `client.test.ts`
+ * ("R1 — null never 0") red, including the one that asserts an unrated wallet
+ * stays distinguishable from a wallet actually scored zero. A green suite with
+ * this function broken is not reachable, which is the only reason to trust the
+ * green one.
  */
 function optNumber(v: unknown): number | null {
   if (v === null || v === undefined) return null;
