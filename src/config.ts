@@ -59,6 +59,34 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export const TREASURY_EVM = '0xe4dc963c56979E0260fc146b87eE24F18220e545';
 
 /**
+ * The chain id that goes in the ERC-8128 keyid of a partner signature.
+ *
+ * 8453 (Base). Not a preference — it is what the gate accepts:
+ * `describe-net/describenet/partner.py:90` sets `CHAIN_ID = 8453` and passes it
+ * as the ONLY member of `allowed_chain_ids`, with its own comment explaining
+ * that `None` (accept any chain) would be "innecesariamente laxo para una
+ * allowlist de tres servicios propios". Read 2026-08-30.
+ *
+ * The payment SDK's own default happens to be 8453 too, and this constant
+ * deliberately does not lean on that: this value belongs to describe.net's
+ * policy, not to the signer's convenience, and the day one moves the other must
+ * not follow by accident. Measured failure mode of getting it wrong: the gate
+ * answers `chain_not_allowed` and the route charges — loud, since partner mode
+ * throws `DescribePartnerRejected` instead of paying.
+ */
+export const PARTNER_CHAIN_ID = 8453;
+
+/**
+ * The environment variable `partnerFromEnv()` reads the signing key from.
+ *
+ * A variable name is not a secret; the value it holds is. Naming it here means
+ * a consumer can grep for it, a deploy manifest can set it, and nobody has to
+ * guess — while `partnerFromEnv()` staying the ONLY reader means the key has
+ * exactly one path into this package.
+ */
+export const PARTNER_KEY_ENV = 'DESCRIBE_PARTNER_PRIVATE_KEY';
+
+/**
  * The package version, for the `User-Agent`.
  *
  * MeshRelay reads its version from `package.json` at runtime because "a

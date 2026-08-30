@@ -24,6 +24,13 @@
  * }
  * ```
  *
+ * ## Three ways in, and only one of them costs anything
+ *
+ * Free routes need nothing. Metered routes are paid through `uvd-x402-sdk` via
+ * `uvd-describe-sdk/x402`, or read for FREE through `uvd-describe-sdk/partner`
+ * if your wallet is on describe.net's partner allowlist — a signature per
+ * request, no token, no secret held by the service. See `PartnerSigner`.
+ *
  * ## The free routes degrade, the paid routes do not
  *
  * `wallet()`, `leaderboard()` and `health()` return `null` when describe.net
@@ -45,7 +52,12 @@
  */
 
 export { DescribeClient } from './client';
-export type { DescribeClientConfig, DescribeFailure, X402Payer } from './client';
+export type {
+  DescribeClientConfig,
+  DescribeFailure,
+  PartnerSigner,
+  X402Payer,
+} from './client';
 
 export {
   DescribeError,
@@ -57,6 +69,14 @@ export {
    * free routes it still never does.
    */
   DescribeNotFound,
+  /**
+   * The two partner-rail failures. Both are exported because both are meant to
+   * be caught by `instanceof`: `DescribePartnerUnsigned` is "fix your config",
+   * `DescribePartnerRejected` is "your free rail is off and we did NOT pay for
+   * you". Neither is ever swallowed by `failOpen`.
+   */
+  DescribePartnerRejected,
+  DescribePartnerUnsigned,
   DescribePaymentRefused,
   DescribePaymentRequired,
   DescribeTimeout,
@@ -82,6 +102,8 @@ export {
   DEFAULT_BASE_URL,
   DEFAULT_SITE_URL,
   DEFAULT_TIMEOUT_MS,
+  PARTNER_CHAIN_ID,
+  PARTNER_KEY_ENV,
   SDK_NAME,
   SDK_VERSION,
   TREASURY_EVM,

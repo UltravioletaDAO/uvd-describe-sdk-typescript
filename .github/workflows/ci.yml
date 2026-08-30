@@ -38,23 +38,35 @@ jobs:
 
       # The whole dependency argument of this package, asserted rather than
       # promised: a free-only consumer installs nothing. If a stray runtime
-      # import of `uvd-x402-sdk` (or anything else) ever lands in either entry,
-      # this fails.
-      - name: The built package has zero runtime imports
+      # import of `uvd-x402-sdk` (or anything else) ever lands in `index` or
+      # `x402`, this fails.
+      #
+      # ⚠️ Extended 2026-08-30 for the partner rail, and it did NOT become an
+      # exemption. `partner/index` is the one entry that genuinely needs the
+      # payment SDK at runtime — it calls its ERC-8128 signer — so instead of
+      # being skipped it declares the EXACT set it may import. For that file
+      # this is stricter than the rule it replaces, not looser: a SECOND import
+      # landing there (ethers, or a bundled copy of the SDK) fails as loudly as
+      # one landing in `index`, and so does the import DISAPPEARING, which is
+      # what bundling the dependency instead of externalising it looks like.
+      - name: Each built entry imports exactly what it is allowed to
         run: |
           node -e "
           const {readFileSync}=require('fs');
+          const ALLOWED={'index':[],'x402/index':[],'partner/index':['uvd-x402-sdk/erc8128']};
           let bad=false;
-          for (const f of ['dist/index.js','dist/x402/index.js']) {
-            const r=[...readFileSync(f,'utf8').matchAll(/require\(['\"]([^'\"]+)['\"]\)/g)].map(m=>m[1]);
-            if (r.length) { console.error('FAIL', f, 'requires', r); bad=true; }
-          }
-          for (const f of ['dist/index.mjs','dist/x402/index.mjs']) {
-            const i=[...readFileSync(f,'utf8').matchAll(/^\s*import[^;]*?from\s*['\"]([^'\"]+)['\"]/gm)].map(m=>m[1]);
-            if (i.length) { console.error('FAIL', f, 'imports', i); bad=true; }
+          for (const [entry, allowed] of Object.entries(ALLOWED)) {
+            const cjs=[...readFileSync('dist/'+entry+'.js','utf8').matchAll(/require\(['\"]([^'\"]+)['\"]\)/g)].map(m=>m[1]);
+            const esm=[...readFileSync('dist/'+entry+'.mjs','utf8').matchAll(/^\s*import[^;]*?from\s*['\"]([^'\"]+)['\"]/gm)].map(m=>m[1]);
+            for (const [kind, found] of [['cjs',cjs],['esm',esm]]) {
+              const extra=found.filter(x=>!allowed.includes(x));
+              if (extra.length) { console.error('FAIL', entry, kind, 'imports', extra); bad=true; }
+              const missing=allowed.filter(x=>!found.includes(x));
+              if (missing.length) { console.error('FAIL', entry, kind, 'no longer imports', missing, '- bundled instead of external?'); bad=true; }
+            }
           }
           if (bad) process.exit(1);
-          console.log('OK: no runtime imports in either entry');
+          console.log('OK: every entry imports exactly its declared set');
           "
 
   # Does the SERVER still look like what our hand-written types say?

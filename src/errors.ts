@@ -108,7 +108,38 @@ export type DescribeErrorKind =
    * `DO_NOT_PAY`. Never a retry, never `failOpen`-able: the one failure where
    * continuing quietly costs real USDC to a stranger.
    */
-  | 'payment_refused';
+  | 'payment_refused'
+  /**
+   * Partner mode is configured and the signature could not be produced AT ALL.
+   *
+   * The CALLER's configuration, not describe.net's: an unset env var, a signer
+   * that refuses, a wallet that is locked. `serviceFault: false`, so `failOpen`
+   * never swallows it — on a free route either. A partner client that silently
+   * loses its signature is a partner client that silently starts paying, and
+   * that is the whole failure this rail exists to make impossible.
+   */
+  | 'partner_unsigned'
+  /**
+   * We signed, and describe.net charged anyway.
+   *
+   * The signature was produced and sent, and the metered route still answered
+   * 402 — so the gate did not exempt us. Measured causes, in the order they
+   * happen in real life (`describe-net/describenet/partner.py`):
+   *
+   *   * the wallet is not in the allowlist (`partner.py:242`), i.e. nobody has
+   *     added this partner yet — Execution Market is registered, KarmaKadabra
+   *     and MeshRelay are NOT, as of 2026-08-30;
+   *   * the signed `@authority` is not `api.describe.net` (`partner.py:84`) —
+   *     which is what a custom `baseUrl` produces, including the raw
+   *     execute-api host behind CloudFront, deliberately;
+   *   * the keyid's chain is not 8453 (`partner.py:90`);
+   *   * the clock is off by more than 30 s ahead or the signature is older than
+   *     300 s (`partner.py:95-96`).
+   *
+   * `payment` is ABSENT and that is load-bearing: nothing was signed, nothing
+   * was sent, nothing was spent. This error is the moment BEFORE the money.
+   */
+  | 'partner_rejected';
 
 /**
  * What this SDK can honestly say about the USDC when a metered call fails.
@@ -314,6 +345,95 @@ export class DescribePaymentRefused extends DescribeError {
     this.challenge = challenge;
     this.expected = expected;
     this.offered = offered;
+  }
+}
+
+/**
+ * Partner mode is on and the signature could not be produced.
+ *
+ * ## Why this THROWS instead of quietly paying, on every route
+ *
+ * The alternative is the one thing a partner rail must never do. Without a
+ * signature the request is an ordinary anonymous request: describe.net answers
+ * 402 on a metered route and the configured payer settles it, in USDC, silently
+ * — the consumer keeps getting answers and only finds out at the invoice. Saul
+ * asked for a rail where our own products read for free; a rail that degrades
+ * into paying is not that rail, it is a bill.
+ *
+ * So this is a CALLER-fault error (`serviceFault: false`), which means
+ * `failOpenCovers()` is `false` for it and `failOpen: true` does not swallow it
+ * — not even on the free routes, where the signature costs nothing and buys
+ * nothing. That is deliberate and not an oversight: a partner whose signer is
+ * broken on `/health` has the same broken signer on
+ * `/reputation/wallet/{w}` thirty seconds later, and the free call is the
+ * cheapest possible place to find out.
+ *
+ * It carries no `payment` — nothing was sent, so nothing could have settled.
+ *
+ * 🔴 `cause` is the signer's own error and this class never reads it, never
+ * reformats it and never puts it in `message`. A signer that fails on a
+ * malformed key can have key material inside its exception (measured: see
+ * `partner/index.ts`, the ethers `invalid BytesLike value` finding), and this
+ * SDK will not be the thing that copies it into a log line.
+ */
+export class DescribePartnerUnsigned extends DescribeError {
+  /** The signing address, when the signer published one. Public by design. */
+  readonly address: string | undefined;
+  constructor(path: string, address: string | undefined, cause: unknown) {
+    super(
+      'partner_unsigned',
+      `Partner mode is configured but signing GET ${path} failed` +
+        `${address ? ` for ${address}` : ''}. This is a CALLER configuration ` +
+        'failure, and it is raised rather than downgraded on purpose: without a ' +
+        'signature this client is an anonymous client, and an anonymous client ' +
+        'PAYS. Read `error.cause` for the signer\'s own error.',
+      { transient: false, serviceFault: false, cause },
+    );
+    this.name = 'DescribePartnerUnsigned';
+    this.address = address;
+  }
+}
+
+/**
+ * We signed as a partner and describe.net asked for money anyway.
+ *
+ * ## The case this class exists for, and it is the important one
+ *
+ * A partner client that gets a 402 has lost its free rail. If it falls through
+ * to the payer, the fall is invisible: same answers, same latency, same shape —
+ * and USDC leaving a wallet that budgeted none. The alternative failure (a loud
+ * throw) costs one broken read and a fixable configuration; the silent one costs
+ * money for as long as nobody looks.
+ *
+ * So partner mode does NOT pay by default. `partnerFallsBackToPaying: true`
+ * turns it back on as an explicit, typed decision by the caller — the flag
+ * exists so that "pay anyway" is something someone WROTE, never something that
+ * happened.
+ *
+ * The challenge is attached unpaid, so a caller who decides to pay after all can
+ * read exactly what it would have cost. And `payment` is absent: this is thrown
+ * before `payer.pay()` is ever reached, so nothing was signed and nothing moved.
+ */
+export class DescribePartnerRejected extends DescribeError {
+  readonly challenge: X402Challenge;
+  /** The address we signed with. Public by design — the allowlist is public. */
+  readonly address: string | undefined;
+  constructor(path: string, address: string | undefined, challenge: X402Challenge) {
+    super(
+      'partner_rejected',
+      `GET ${path} answered 402 even though this client signed it as a partner` +
+        `${address ? ` with ${address}` : ''}. The free rail is NOT active: the ` +
+        'address may not be in describe.net\'s allowlist, the signed @authority ' +
+        'may not be api.describe.net (a custom baseUrl does that), the keyid ' +
+        'chain may not be 8453, or the clock may be off. NOTHING WAS PAID — ' +
+        'this throw is what stops a partner from silently spending USDC. Read ' +
+        '`error.challenge` for the price, or set `partnerFallsBackToPaying: true` ' +
+        'to pay on purpose.',
+      { transient: false, serviceFault: false, status: 402 },
+    );
+    this.name = 'DescribePartnerRejected';
+    this.challenge = challenge;
+    this.address = address;
   }
 }
 

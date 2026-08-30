@@ -49,6 +49,24 @@
  * fact. What the exception carries instead is `error.payment` (see
  * `errors.ts::PaymentAttempt`) and `failedAfterPaying()` reads it.
  *
+ * ## 🔴 The partner rail has a THIRD money rule — added 2026-08-30
+ *
+ * With `partner` configured (see `PartnerSigner` below and
+ * `uvd-describe-sdk/partner`), every request is signed and the metered routes
+ * are supposed to be free. Two failures are therefore CALLER-fault and neither
+ * one degrades:
+ *
+ *   1. the signature could not be produced → `DescribePartnerUnsigned`, thrown
+ *      on every route including the free ones, `failOpen` or not;
+ *   2. the signature was produced and the route charged anyway →
+ *      `DescribePartnerRejected`, thrown BEFORE the payer is ever called.
+ *
+ * Both are `serviceFault: false`, so `failOpenCovers()` refuses them. The
+ * symmetry with the paid-route rule is exact and deliberate: there, money that
+ * already moved may not be swallowed; here, money that is ABOUT to move may not
+ * be spent by accident. A partner rail that quietly falls back to paying is
+ * indistinguishable from a working one until the invoice arrives.
+ *
  * ## What this client deliberately does NOT do
  *
  * **No cache.** MeshRelay has one (a `Map`, 12-minute TTL) and needs it: it
@@ -84,6 +102,8 @@ import {
   DescribeError,
   DescribeHTTPError,
   DescribeNotFound,
+  DescribePartnerRejected,
+  DescribePartnerUnsigned,
   DescribePaymentRefused,
   DescribePaymentRequired,
   DescribeTimeout,
@@ -129,6 +149,59 @@ export interface X402Payer {
    * header. Throwing aborts the call — nothing is replayed.
    */
   pay(challenge: X402Challenge): Promise<string>;
+}
+
+/**
+ * How a request proves it comes from a partner of the house.
+ *
+ * ## The seam, and why it is exactly one method wide
+ *
+ * Same shape and same reason as {@link X402Payer}: this package holds no key,
+ * builds no signature and knows no cryptography. It hands a request over and
+ * gets headers back. Anything wider would start encoding signing knowledge that
+ * belongs to `uvd-x402-sdk`, and the canonical implementation — which does
+ * nothing but call that SDK's ERC-8128 signer — ships at
+ * `uvd-describe-sdk/partner`, behind a subpath, so the main entry keeps its zero
+ * runtime imports.
+ *
+ * ## What the other side does with it
+ *
+ * describe.net has no accounts and no API keys — *"el pago es la
+ * autenticación"* — so the free rail for our own products could not be a token.
+ * It is an allowlist of PUBLIC ADDRESSES plus a per-request ERC-8128 signature
+ * (`describe-net/describenet/partner.py`, read 2026-08-30). The service
+ * therefore custodies no secret of ours: a breach of describe.net leaks a list
+ * of addresses, which are already public. That property is the reason this is a
+ * signature and not the `X-API-Key` everybody expects, and it is worth
+ * protecting when extending this interface.
+ *
+ * The gate verifies with a policy pinned to `api.describe.net`, chain 8453 and a
+ * 300 s window, and then — the line that makes it a gate — looks the recovered
+ * address up in the allowlist (`partner.py:242`). A valid signature from an
+ * unlisted wallet pays like everybody else.
+ *
+ * ## Throwing is the contract
+ *
+ * `sign()` MUST throw rather than return partial or unsigned headers. The client
+ * turns that throw into `DescribePartnerUnsigned` and raises it — it never
+ * proceeds unsigned, because an unsigned request from a partner client is an
+ * anonymous request, and an anonymous request pays.
+ */
+export interface PartnerSigner {
+  /**
+   * Sign one request; return the headers to add to it.
+   *
+   * For describe.net's GET-only surface that is `Signature` and
+   * `Signature-Input` (RFC 9421). `Content-Digest` appears only for a request
+   * with a body, and this client never sends one.
+   */
+  sign(request: { method: string; url: string }): Promise<Record<string, string>>;
+  /**
+   * The signing address, if the implementation cares to publish it. Used ONLY
+   * to write a useful error message. It is never sent as a header and never
+   * trusted: the server decides from the address it RECOVERS, not one we claim.
+   */
+  readonly address?: string;
 }
 
 /** What `onFailure` is handed. Enough to log, alert or fall back on. */
@@ -189,6 +262,37 @@ export interface DescribeClientConfig {
   /** Pay metered routes. Without it, a 402 throws `DescribePaymentRequired`. */
   payer?: X402Payer;
   /**
+   * Enter through the partner rail: sign every request as a wallet the house
+   * has allowlisted, and read the metered routes for free.
+   *
+   * Build one with `partnerFromEnv()` or `partnerFromSigner()` from
+   * `uvd-describe-sdk/partner`. Both are the same rail — one reads a key the
+   * environment holds, the other takes a signer you already have.
+   *
+   * 🔴 EVERY request is signed, free routes included, and that is a decision
+   * with a reason: the alternative is a table in this package saying which
+   * routes are metered, which would be a second copy of the service's
+   * `pricing.TIERS` and would silently start paying the day a free route
+   * becomes metered. The server already knows which is which; we do not need
+   * to. What it costs, measured on this machine 2026-08-30 (Node v23.11.0, 200
+   * signatures with an in-process ethers wallet, after 20 warm-up rounds):
+   * **0,67 ms** per signature, against a 30 000 ms request timeout. Four ten-
+   * thousandths of the budget for the request it rides on.
+   */
+  partner?: PartnerSigner;
+  /**
+   * 🔴 Default **false**, and the default is the point.
+   *
+   * With partner mode on, a metered route that answers 402 means the free rail
+   * did not work. By default that throws `DescribePartnerRejected` and NOTHING
+   * IS PAID. Set this to `true` to fall through to the `payer` instead — an
+   * explicit decision to spend USDC when the rail is down, which is a
+   * reasonable thing to want and an unreasonable thing to get by accident.
+   *
+   * With no `partner` configured this flag does nothing at all.
+   */
+  partnerFallsBackToPaying?: boolean;
+  /**
    * The only address this client will pay. Defaults to the pinned treasury.
    * Override only if you have verified a rotation out of band — see
    * `config.ts::TREASURY_EVM` for the failure mode of pinning.
@@ -206,6 +310,8 @@ export class DescribeClient {
   private readonly failOpen: boolean;
   private readonly onFailure?: (failure: DescribeFailure) => void;
   private readonly payer?: X402Payer;
+  private readonly partner?: PartnerSigner;
+  private readonly partnerFallsBackToPaying: boolean;
   private readonly expectedPayTo: string;
   private readonly fetchImpl: typeof fetch;
 
@@ -216,6 +322,8 @@ export class DescribeClient {
     this.failOpen = config.failOpen ?? true;
     this.onFailure = config.onFailure;
     this.payer = config.payer;
+    this.partner = config.partner;
+    this.partnerFallsBackToPaying = config.partnerFallsBackToPaying ?? false;
     this.expectedPayTo = config.expectedPayTo ?? TREASURY_EVM;
     const impl = config.fetchImpl ?? globalThis.fetch;
     if (typeof impl !== 'function') {
@@ -382,13 +490,35 @@ export class DescribeClient {
     }
   }
 
+  /**
+   * The partner headers for one request, or `{}` when there is no partner.
+   *
+   * 🔴 THIS RUNS OUTSIDE `request()`'s try/catch AND THAT IS THE WHOLE POINT.
+   * Inside it, a signer that threw would be caught by the transport handler and
+   * re-thrown as `DescribeUnreachable` — which is `serviceFault: true`, which
+   * `failOpen` swallows, which turns "my partner key is missing" into a `null`
+   * that reads as "this wallet has no reputation". The most expensive bug in
+   * this file, one indentation level away.
+   */
+  private async partnerHeaders(path: string): Promise<Record<string, string>> {
+    if (!this.partner) return {};
+    try {
+      return await this.partner.sign({ method: 'GET', url: `${this.baseUrl}${path}` });
+    } catch (error) {
+      throw new DescribePartnerUnsigned(path, this.partner.address, error);
+    }
+  }
+
   private async request(path: string, headers: Record<string, string> = {}): Promise<Response> {
+    // Signed BEFORE the timer starts and before the try: see `partnerHeaders`.
+    const signed = await this.partnerHeaders(path);
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: 'GET', // never HEAD: every route but /openapi.json answers 405 to it
-        headers: { Accept: 'application/json', 'User-Agent': this.ua, ...headers },
+        headers: { Accept: 'application/json', 'User-Agent': this.ua, ...signed, ...headers },
         signal: controller.signal,
       });
     } catch (error) {
@@ -462,6 +592,17 @@ export class DescribeClient {
     }
 
     const challenge = await this.readChallenge(first, path);
+
+    // ── THE PARTNER RAIL FAILED, AND FAILING LOUDLY IS THE FEATURE ──────────
+    // We signed this request (every request is signed in partner mode) and the
+    // route charged anyway, so the gate did not exempt us. Falling through to
+    // `payer.pay()` from here is the silent downgrade this whole rail exists to
+    // prevent: identical answers, identical latency, USDC leaving a wallet that
+    // budgeted none. Checked BEFORE the missing-payer branch because "your free
+    // rail is down" is the more useful of the two messages when both are true.
+    if (this.partner && !this.partnerFallsBackToPaying) {
+      throw new DescribePartnerRejected(path, this.partner.address, challenge);
+    }
 
     if (!this.payer) {
       throw new DescribePaymentRequired(
