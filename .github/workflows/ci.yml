@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Offline. The suite never touches the network — a test that goes red
+      # because someone's wifi dropped teaches people to ignore red.
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Package smoke test
+        run: npm pack --dry-run
+
+      # The whole dependency argument of this package, asserted rather than
+      # promised: a free-only consumer installs nothing. If a stray runtime
+      # import of `uvd-x402-sdk` (or anything else) ever lands in either entry,
+      # this fails.
+      - name: The built package has zero runtime imports
+        run: |
+          node -e "
+          const {readFileSync}=require('fs');
+          let bad=false;
+          for (const f of ['dist/index.js','dist/x402/index.js']) {
+            const r=[...readFileSync(f,'utf8').matchAll(/require\(['\"]([^'\"]+)['\"]\)/g)].map(m=>m[1]);
+            if (r.length) { console.error('FAIL', f, 'requires', r); bad=true; }
+          }
+          for (const f of ['dist/index.mjs','dist/x402/index.mjs']) {
+            const i=[...readFileSync(f,'utf8').matchAll(/^\s*import[^;]*?from\s*['\"]([^'\"]+)['\"]/gm)].map(m=>m[1]);
+            if (i.length) { console.error('FAIL', f, 'imports', i); bad=true; }
+          }
+          if (bad) process.exit(1);
+          console.log('OK: no runtime imports in either entry');
+          "
+
+  # Does the SERVER still look like what our hand-written types say?
+  #
+  # Separate job, and NOT part of `validate`, because it is the only thing here
+  # that touches the network: a red here means describe.net moved, which is a
+  # different conversation from "this PR broke something". Scheduled as well as
+  # on push, because the server can move while nobody is pushing.
+  schema-drift:
+    name: Live schema still matches the snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Compare schema/openapi.snapshot.json against the live API
+        run: npm run schema:check

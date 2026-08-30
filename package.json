@@ -1,0 +1,87 @@
+{
+  "name": "uvd-describe-sdk",
+  "version": "0.1.0",
+  "description": "Read reputation from describe.net — the ERC-8004 index across 11 chains. Free lookups need no dependency; metered lookups pay their 402 through uvd-x402-sdk. null is never 0.",
+  "author": "Ultravioleta DAO <ultravioletadao@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UltravioletaDAO/uvd-describe-sdk-typescript"
+  },
+  "homepage": "https://describe.net",
+  "keywords": [
+    "describe",
+    "reputation",
+    "erc-8004",
+    "trustless-agents",
+    "x402",
+    "agents",
+    "onchain-reputation",
+    "leaderboard",
+    "sdk"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./x402": {
+      "types": "./dist/x402/index.d.ts",
+      "import": "./dist/x402/index.mjs",
+      "require": "./dist/x402/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "x402": [
+        "./dist/x402/index.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "schema:refresh": "node scripts/refresh-schema.mjs",
+    "schema:check": "node scripts/refresh-schema.mjs --check",
+    "smoke": "node scripts/smoke-free.mjs",
+    "prepublishOnly": "npm run clean && npm run typecheck && npm run test && npm run lint && npm run build"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "uvd-x402-sdk": "^2.75.0"
+  },
+  "peerDependenciesMeta": {
+    "uvd-x402-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "rimraf": "^6.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.57.2",
+    "uvd-x402-sdk": "^2.75.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

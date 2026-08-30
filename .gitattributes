@@ -1,0 +1,18 @@
+# Normalize all text files to LF in the repository (standard cross-platform setup).
+# Prevents CRLF/LF churn when editing on Windows/WSL.
+* text=auto eol=lf
+
+# The pinned OpenAPI snapshot. `scripts/refresh-schema.mjs` rewrites it and
+# `src/types.schema.test.ts` reads it, so a CRLF round-trip on Windows would
+# show the whole file as changed on every refresh and bury the one structural
+# change somebody needs to review.
+schema/openapi.snapshot.json text eol=lf
+
+# Explicit binaries (never normalize).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

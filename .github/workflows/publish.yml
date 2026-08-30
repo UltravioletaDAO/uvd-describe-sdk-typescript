@@ -1,0 +1,68 @@
+name: Publish to npm
+
+# 🔴 NOTHING IS PUBLISHED YET. This workflow is prepared and deliberately
+# unarmed: the repository does not exist on GitHub, the package does not exist
+# on npm, and `secrets.NPM_TOKEN` is not set. It fires on a `v*` tag, and no
+# such tag has been created. Saul gives the go-ahead separately.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Pinned by commit SHA, not tag. A mutable tag lets whoever controls the
+      # action repo change what runs inside a workflow that holds a publish
+      # credential. Refresh deliberately, not implicitly.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Package smoke test
+        run: npm pack --dry-run
+
+      # NOTE: this authenticates with a long-lived NPM_TOKEN. `id-token: write`
+      # above only buys --provenance; the credential itself is a classic token,
+      # which is what the npm supply-chain attacks steal from CI.
+      #
+      # Migrating to npm trusted publishing (OIDC, no stored token) needs a
+      # one-time change on npmjs.com that cannot be made from this repo: link
+      # the package to this repository + workflow under Settings -> Trusted
+      # Publishers. Since this package has NEVER been published, it is the one
+      # moment where that link can be made BEFORE a token ever exists — do it
+      # then, and delete the `env:` block below instead of inheriting the debt.
+      #
+      # (The sibling `uvd-x402-sdk-python` carries a comment claiming it
+      # "already uses OIDC trusted publishing, so there is no token to steal"
+      # while its step passes `TWINE_PASSWORD: secrets.PYPI_TOKEN`. The comment
+      # is wrong about its own code. Noted here so the mistake is not copied a
+      # third time.)
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
