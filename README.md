@@ -8,10 +8,14 @@ npm install uvd-describe-sdk
 ```
 
 **Zero runtime dependencies.** The free routes need no package, no credential and
-no account. Metered routes pay their 402 through
-[`uvd-x402-sdk`](https://www.npmjs.com/package/uvd-x402-sdk), which lives behind
-the `uvd-describe-sdk/x402` subpath and is an *optional* peer — install it only
-if you pay.
+no account. The metered routes need one of two things, and both live behind
+subpaths so a free-only consumer installs neither:
+
+* **pay** the 402 through [`uvd-x402-sdk`](https://www.npmjs.com/package/uvd-x402-sdk)
+  (`uvd-describe-sdk/x402`), an *optional* peer;
+* or **don't** — if your wallet is on describe.net's partner allowlist, sign
+  each request instead and read the metered routes for free
+  (`uvd-describe-sdk/partner`, see [the partner rail](#not-paying-the-partner-rail)).
 
 ---
 
@@ -55,8 +59,8 @@ And the version with no JavaScript at all, which is most of what most pages need
 | `health()` | **free** | `GET /health` | `null` + `onFailure` |
 | `badgeUrl(address)` | **no network** | builds a `/badge/{w}.svg` URL | cannot fail |
 | `profileUrl(address)` | **no network** | builds a describe.net profile URL | cannot fail |
-| `walletBreakdown(address)` | $0.01 | `GET /reputation/wallet/{w}` | **throws, always** |
-| `agent(network, agentId)` | $0.02 | `GET /reputation/agent/{n}/{id}` | **throws, always** |
+| `walletBreakdown(address)` | $0.01 — or **free** on the [partner rail](#not-paying-the-partner-rail) | `GET /reputation/wallet/{w}` | **throws, always** |
+| `agent(network, agentId)` | $0.02 — or **free** on the [partner rail](#not-paying-the-partner-rail) | `GET /reputation/agent/{n}/{id}` | **throws, always** |
 
 Prices are documentation with a date on them (2026-08-30). What gets paid is
 what the live 402 challenge says — this package never types a price into a code
@@ -169,6 +173,8 @@ apply to the metered routes at all:
 | `not_found` | `null`, announced | **throws** | no | absence. Free routes have a `null` to degrade into; metered ones do not |
 | `payment_required` | — | **throws** | no | metered route, no `payer` configured. Carries the challenge |
 | `payment_refused` | — | **throws** | no | `DO_NOT_PAY` — the challenge named a treasury that is not ours |
+| `partner_unsigned` | **throws** | **throws** | no | partner mode on and the signature could not be produced. **Yours**, and it throws on the free routes too — an unsigned partner client is an anonymous client, and an anonymous client pays |
+| `partner_rejected` | — | **throws** | no | you signed and were charged anyway: the free rail is off. Thrown *before* the payer, so nothing was spent |
 
 With `failOpen: false` the free routes throw instead. `not_found` on a free
 route never throws either way: `failOpen` is about *their outage*, absence is a
@@ -267,6 +273,81 @@ decomposition.
 
 ---
 
+## Not paying: the partner rail
+
+If your wallet is on describe.net's partner allowlist, the metered routes are
+free for you. There is no token to hold and no secret for describe.net to lose:
+**the allowlist is a list of public addresses**, and you prove you are one of
+them by signing each request (ERC-8128 over RFC 9421) with a dedicated wallet
+that holds no funds and does nothing but sign.
+
+```ts
+import { DescribeClient } from 'uvd-describe-sdk';
+import { partnerFromEnv } from 'uvd-describe-sdk/partner';
+
+// DESCRIBE_PARTNER_PRIVATE_KEY lives in the environment. There is no argument
+// to paste a key into — deliberately.
+const describe = new DescribeClient({
+  product: 'meshrelay',
+  partner: partnerFromEnv(),
+});
+
+const detail = await describe.walletBreakdown(wallet);  // metered route, $0.00
+detail.payment;                                          // null — nothing was paid
+```
+
+Already have a signer? Hand it over and no key ever enters this package:
+
+```ts
+import { partnerFromSigner } from 'uvd-describe-sdk/partner';
+
+partner: partnerFromSigner({
+  address: await wallet.getAddress(),
+  signMessage: (base) => wallet.signMessage(base),   // EIP-191 personal_sign
+});
+```
+
+This subpath is the one that needs `uvd-x402-sdk` installed: the signing is
+entirely theirs. Nothing here reimplements a byte of it.
+
+### 🔴 A partner that cannot sign RAISES — it never quietly starts paying
+
+This is the whole reason the rail is worth its code. Two failures are yours, not
+describe.net's, and neither one degrades — not with `failOpen: true`, not on the
+free routes, not ever:
+
+| What happened | You get | What it cost |
+|---|---|---|
+| the signer threw (key unset, vault locked) | `DescribePartnerUnsigned` | nothing — the request was never sent |
+| you signed and the route charged anyway | `DescribePartnerRejected` | **nothing** — thrown *before* your payer is called |
+
+Losing the free rail is a configuration problem that costs one broken read.
+Losing it *silently* is the same problem with a bill attached: identical
+answers, identical latency, USDC leaving a wallet that budgeted none, and nobody
+finds out until the invoice. So partner mode does not pay by default.
+
+`DescribePartnerRejected` means the gate did not exempt you. In descending order
+of likelihood: your address is not on the allowlist; your `baseUrl` is not
+`https://api.describe.net`, so you signed an authority the gate pins and will
+not accept; the keyid chain is not 8453; your clock is more than 30 s ahead, or
+the signature took longer than 300 s to arrive. The challenge is attached
+unpaid, so you can read what it *would* have cost.
+
+To pay anyway when the rail is down, say so out loud:
+
+```ts
+new DescribeClient({ partner, payer, partnerFallsBackToPaying: true });
+```
+
+**Every request is signed, free routes included.** A table of "which routes are
+metered" inside this package would be a second copy of the service's price list,
+and it would start paying on its own the day a free route becomes metered. The
+server already knows which is which. Measured cost of signing everything:
+**0,67 ms** per signature (Node v23.11.0, 200 signatures, 2026-08-30) against a
+30 000 ms request timeout.
+
+---
+
 ## What this package deliberately does not do
 
 **No `getScore(): number`.** Every result carries `policyVersion`, `caveats[]`
@@ -308,6 +389,8 @@ holds no key.
 | `onFailure` | — | Pass it. See above |
 | `payer` | — | |
 | `expectedPayTo` | the pinned treasury | Override only if you verified a rotation out of band |
+| `partner` | — | The [partner rail](#not-paying-the-partner-rail). Signs every request; metered routes are free if your address is allowlisted |
+| `partnerFallsBackToPaying` | `false` | With a partner configured, a 402 throws instead of paying. `true` is an explicit decision to spend USDC when the rail is down |
 
 Never hardcode a threshold. `health()` publishes the live `readingPolicy` and
 `confidenceThresholds` precisely so nobody re-types them.

@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. 93 tests in ~0,6 s (were 84 before the paid-route fix of 2026-08-30) |
+| `npm test` | vitest, **offline**. **111 tests in ~0,9 s** (were 93 before the partner rail of 2026-08-30, 84 before the paid-route fix of the same day) |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
@@ -55,8 +55,11 @@ pay, deliberately.
                 402 flow)   ├──> caveats.ts  (the 8 frozen codes)
                             └──> format.ts   (R8: 83.0 -> "83")
 
-  x402/index.ts   the ONLY file that knows uvd-x402-sdk exists.
-                  `import type` only, so the built JS imports NOTHING.
+  x402/index.ts     pays a 402. Knows uvd-x402-sdk by `import type` ONLY, so the
+                    built JS imports NOTHING.
+  partner/index.ts  does NOT pay: signs ERC-8128 as an allowlisted wallet. The
+                    ONE entry with a real runtime import, and it is exactly
+                    `uvd-x402-sdk/erc8128` — asserted in CI, not promised.
 ```
 
 ### Who owns what
@@ -70,6 +73,7 @@ pay, deliberately.
 | `parse.ts` | Wire JSON → typed. The only place a `null` could be lost, so it is the place to look when one is |
 | `client.ts` | HTTP, timeouts, fail-open, the 402 dance, the treasury check |
 | `x402/index.ts` | The payer adapter. Type-only import — nothing at runtime |
+| `partner/index.ts` | The partner rail: chain id, nonce, and a forward to `uvd-x402-sdk`'s ERC-8128 signer. **Zero cryptography of its own**, and the only guard it adds is the private-key shape check, which exists because ethers leaks an unredacted key on the malformed-input path (measured — read the docstring) |
 
 ## Invariants — breaking any of these is the bug this package exists to prevent
 
@@ -97,13 +101,38 @@ pay, deliberately.
    no receipt. A failure with a signed envelope already in flight carries
    `error.payment` (`PaymentAttempt`); its **absence** states that nothing was
    transmitted. `failedAfterPaying()` is the predicate.
-5. **We never sign.** No EIP-3009, no key, no envelope. The payment is
-   `uvd-x402-sdk`'s, always — upstream-first. If it lacks something, it is
-   added THERE and consumed here. Never patched in this repo.
+4c. 🔴 **The partner rail never degrades into paying.** With `partner`
+   configured, a signer that throws is `DescribePartnerUnsigned` (raised on the
+   FREE routes too, `failOpen` or not) and a 402 that arrives anyway is
+   `DescribePartnerRejected`, raised **before** `payer.pay()` so nothing is
+   spent. Both are `serviceFault: false`, which is what keeps `failOpenCovers()`
+   away from them. `partnerFallsBackToPaying: true` is the explicit opt-out.
+   Same shape as 4b with the sign flipped: there, money that ALREADY moved may
+   not be swallowed; here, money that is ABOUT to move may not be spent by
+   accident. Injected both bugs on 2026-08-30 and the tests went red — the
+   fall-through one resolved with data instead of rejecting, the
+   sign-inside-the-try one resolved to `null` on a free route.
+5. **We never sign a PAYMENT, and we never sign at all in this package.** No
+   EIP-3009, no key, no envelope — and, since the partner rail, no RFC 9421
+   canonicalisation either: `partner/index.ts` picks a chain id and a nonce and
+   forwards to `uvd-x402-sdk/erc8128`. Upstream-first. If the payment SDK lacks
+   something, it is added THERE and consumed here. Never patched in this repo.
+   ⚠️ The one thing `partner/index.ts` does add is an input guard, and it is not
+   an exception to this rule: it validates the private-key SHAPE before handing
+   it over, because ethers 6.17.0 puts an unredacted key in its exception on the
+   malformed-input path (measured 2026-08-30). Refusing to pass garbage
+   downstream is not reimplementing what is downstream.
 6. **The treasury check runs before the payer is called**, over the top-level
    recipient *and* every `accepts[]` entry.
-7. **The built entries have zero runtime imports.** Asserted in CI, not
-   promised. It is the whole reason a free-only consumer installs nothing.
+7. **Each built entry imports exactly its declared set.** Asserted in CI, not
+   promised. ⚠️ Reworded 2026-08-30; it read *"The built entries have zero
+   runtime imports"*, and for `index` and `x402/index` it still means exactly
+   that — the whole reason a free-only consumer installs nothing. The partner
+   rail added a third entry that genuinely needs the payment SDK at runtime, and
+   the check did **not** get an exemption for it: `partner/index` declares
+   `['uvd-x402-sdk/erc8128']` and CI fails both if something else appears there
+   AND if that import disappears, which is what `external` breaking and the
+   dependency getting bundled would look like.
 8. **A 404 never reaches a caller as an exception — on the FREE routes.**
    ⚠️ Corrected 2026-08-30; the old text read *"A 404 never reaches a caller as
    an exception. `DescribeNotFound` is not exported from `index.ts` for exactly
@@ -130,6 +159,33 @@ What separates it from its neighbour: Python's `bool([])` is `False`, so the
 same check written in the recon phase read *correctly* and the JS one did not —
 if a schema fact disagrees between a Python note and this repo, this is the first
 thing to suspect.
+
+**🔴 ethers redacts a bad private key on ONE path and prints it verbatim on the
+other.** Measured 2026-08-30 with `ethers` 6.17.0 (what `uvd-x402-sdk` 2.75.0
+pulls in). A key that is well-formed hex but not a valid scalar reaches the
+`SigningKey` check and comes back redacted; a key that is not valid hex — a
+trailing newline, a stray space, a typo — fails EARLIER, inside `getBytes`,
+and its message contains the whole value.
+
+Reproduce (this prints a synthetic key, never a real one):
+```bash
+node -e "const {ethers}=require('ethers');
+try{new ethers.Wallet('0x'+'ab'.repeat(32)+'\n')}catch(e){console.log(e.message)}"
+# invalid BytesLike value (argument="value", value="0xabab…ab\n", …)   ← the key
+node -e "const {ethers}=require('ethers');
+try{new ethers.Wallet('0x'+'11'.repeat(20))}catch(e){console.log(e.message)}"
+# invalid private key (argument="privateKey", value="[REDACTED]", …)
+```
+Why it matters: the leaky case is the LIKELY one. `KEY=$(cat file)` keeps the
+newline. `partnerFromEnv()` therefore trims and checks
+`^(0x)?[0-9a-fA-F]{64}$` before the key reaches the SDK, so the only thing that
+can reach ethers is 64 hex characters and the only branch it can take is the
+redacted one. Reported upstream; deliberately not patched there from this repo.
+
+What separates it from its neighbour: both errors say "invalid" and both name a
+private key. The one that leaks says `BytesLike` and `argument="value"`; the
+safe one says `private key` and `argument="privateKey"`. If you are reading a
+log to decide whether a key was exposed, that word is the whole answer.
 
 **`process.exit(0)` right after `fetch` crashes on Windows.** Measured on Node
 v23.11.0, 2026-08-30: `refresh-schema.mjs` printed `OK` and then died with
@@ -171,11 +227,18 @@ says failure. If the two disagree, it is teardown, not the check.
   two (TS + Python), following the house precedent of one repo per language
   (`uvd-x402-sdk-typescript` / `uvd-x402-sdk-python`). He has to ratify the
   deviation.
-- 🔴 **The "riel gratis" for our own products.** On 2026-08-14 Saul said
+- ⚠️ ~~🔴 **The "riel gratis" for our own products.** On 2026-08-14 Saul said
   Execution Market, MeshRelay and KarmaKadabra should read for free while third
   parties pay x402. The service has no accounts and no API keys — *"el pago es
   la autenticación"* — so there is no way to tell them apart. **Do not invent a
-  partner header.** It is a question for Saul.
+  partner header.** It is a question for Saul.~~ **RESUELTA 2026-08-30, y la
+  vieja queda escrita porque su prohibición sigue vigente.** Saul la contestó en
+  el servicio, no acá: `describe-net/describenet/partner.py` es una allowlist de
+  DIRECCIONES PÚBLICAS más una firma ERC-8128 por request. Nadie inventó un
+  header — este SDK habla el gate que ya existía. La prohibición no se levantó:
+  sigue prohibido inventar un mecanismo de identidad acá; lo que se hace es
+  implementar el del servicio. Si el gate cambia, cambia allá primero.
+  Implementado en `src/partner/`, subpath `uvd-describe-sdk/partner`.
 - **Whether the three consumers will adopt this.** They work today against the
   raw API. Nobody has asked them.
 
