@@ -24,6 +24,17 @@
  * }
  * ```
  *
+ * ## The free routes degrade, the paid routes do not
+ *
+ * `wallet()`, `leaderboard()` and `health()` return `null` when describe.net
+ * cannot be reached (that is `failOpen`, on by default, always announced
+ * through `onFailure`). `walletBreakdown()` and `agent()` return no `null` at
+ * all and throw instead — including with `failOpen: true` — because between
+ * signing a payment and reading the answer there is a window where the USDC has
+ * already moved, and a `null` there hides a spend from the caller. Use
+ * `failedAfterPaying(error)` to tell "it broke before I paid" from "it broke
+ * after".
+ *
  * ## Note on the public surface
  *
  * There is no function here that returns a bare score. `formatScore` takes a
@@ -39,14 +50,22 @@ export type { DescribeClientConfig, DescribeFailure, X402Payer } from './client'
 export {
   DescribeError,
   DescribeHTTPError,
+  /**
+   * ⚠️ Exported since 2026-08-30 and it used to be deliberately absent: with the
+   * metered methods no longer nullable, a 404 on `walletBreakdown()` / `agent()`
+   * DOES reach the caller as a throw, so `instanceof` has to be possible. On the
+   * free routes it still never does.
+   */
+  DescribeNotFound,
   DescribePaymentRefused,
   DescribePaymentRequired,
   DescribeTimeout,
   DescribeUnparseable,
   DescribeUnreachable,
+  failedAfterPaying,
   failOpenCovers,
 } from './errors';
-export type { DescribeErrorKind, X402Challenge } from './errors';
+export type { DescribeErrorKind, PaymentAttempt, X402Challenge } from './errors';
 
 export {
   CAVEAT_CODES,

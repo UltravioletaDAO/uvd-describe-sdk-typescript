@@ -48,19 +48,24 @@ And the version with no JavaScript at all, which is most of what most pages need
 
 ## The API
 
-| Method | Cost | Route |
-|---|---|---|
-| `wallet(address)` | **free** | `GET /wallets/{w}/chains` |
-| `leaderboard()` | **free** | `GET /leaderboard` |
-| `health()` | **free** | `GET /health` |
-| `badgeUrl(address)` | **no network** | builds a `/badge/{w}.svg` URL |
-| `profileUrl(address)` | **no network** | builds a describe.net profile URL |
-| `walletBreakdown(address)` | $0.01 | `GET /reputation/wallet/{w}` |
-| `agent(network, agentId)` | $0.02 | `GET /reputation/agent/{n}/{id}` |
+| Method | Cost | Route | If describe.net is down |
+|---|---|---|---|
+| `wallet(address)` | **free** | `GET /wallets/{w}/chains` | `null` + `onFailure` |
+| `leaderboard()` | **free** | `GET /leaderboard` | `null` + `onFailure` |
+| `health()` | **free** | `GET /health` | `null` + `onFailure` |
+| `badgeUrl(address)` | **no network** | builds a `/badge/{w}.svg` URL | cannot fail |
+| `profileUrl(address)` | **no network** | builds a describe.net profile URL | cannot fail |
+| `walletBreakdown(address)` | $0.01 | `GET /reputation/wallet/{w}` | **throws, always** |
+| `agent(network, agentId)` | $0.02 | `GET /reputation/agent/{n}/{id}` | **throws, always** |
 
 Prices are documentation with a date on them (2026-08-30). What gets paid is
 what the live 402 challenge says — this package never types a price into a code
 path.
+
+🔴 **The two metered methods return no `null` at all** — not for an outage, not
+for a 404, and not even when you set `failOpen: true` yourself. See
+[Failures](#failures): the line is not how many methods, it is whether there was
+money in flight.
 
 ---
 
@@ -93,7 +98,9 @@ rep.globalScore === null // they answered: no evidence
 ```
 
 A fail-open that says nothing turns the first into the second. That is why
-`onFailure` exists and why you should always pass it.
+`onFailure` exists and why you should always pass it. The invariant, in one
+line: **`onFailure` fires if and only if a method hands you `null` instead of an
+answer.** On the metered routes it therefore never fires — they have no `null`.
 
 ### 3. Branch on `caveat.code`, never on `caveat.text`
 
@@ -148,22 +155,67 @@ const describe = new DescribeClient({
 ```
 
 `failOpen: true` (Saul, 2026-08-28: *"pon un fallback si es que describe está
-caído"*) returns `null` for a **describe.net-side** failure and announces it.
-It does **not** swallow your own bugs:
+caído"*) returns `null` for a **describe.net-side** failure on a **free route**
+and announces it. It does **not** swallow your own bugs, and it does **not**
+apply to the metered routes at all:
 
-| `kind` | throws? | `transient` | what it is |
-|---|---|---|---|
-| `timeout` | fail-open | yes | their cold start (measured 15,2 s) or a slow index |
-| `http_5xx` | fail-open | yes | their fault |
-| `unreachable` | fail-open | yes | DNS, reset, offline, CORS |
-| `unparseable` | fail-open | no | they answered, unreadably. Retrying buys nothing |
-| `http_4xx` | **throws** | only 429 | **your** request. 422 `not_an_address` is the common one |
-| `not_found` | never throws | no | absence. Returns `null`, still announced |
-| `payment_required` | **throws** | no | metered route, no `payer` configured. Carries the challenge |
-| `payment_refused` | **throws** | no | `DO_NOT_PAY` — the challenge named a treasury that is not ours |
+| `kind` | free routes | metered routes | `transient` | what it is |
+|---|---|---|---|---|
+| `timeout` | fail-open | **throws** | yes | their cold start (measured 15,2 s) or a slow index |
+| `http_5xx` | fail-open | **throws** | yes | their fault |
+| `unreachable` | fail-open | **throws** | yes | DNS, reset, offline, CORS |
+| `unparseable` | fail-open | **throws** | no | they answered, unreadably. Retrying buys nothing |
+| `http_4xx` | **throws** | **throws** | only 429 | **your** request. 422 `not_an_address` is the common one |
+| `not_found` | `null`, announced | **throws** | no | absence. Free routes have a `null` to degrade into; metered ones do not |
+| `payment_required` | — | **throws** | no | metered route, no `payer` configured. Carries the challenge |
+| `payment_refused` | — | **throws** | no | `DO_NOT_PAY` — the challenge named a treasury that is not ours |
 
-With `failOpen: false` the first four throw instead. `not_found` never throws
-either way: `failOpen` is about *their outage*, absence is a different axis.
+With `failOpen: false` the free routes throw instead. `not_found` on a free
+route never throws either way: `failOpen` is about *their outage*, absence is a
+different axis.
+
+### 🔴 Why the metered routes never fail open
+
+Because the line is **money**, not symmetry.
+
+`walletBreakdown()` and `agent()` sign a payment and then wait for an answer. In
+that window the USDC has already moved — describe.net's paywall settles *before*
+it runs your query. Handing back `null` there tells you *"there was nothing to
+fetch"* about a call that just spent your money, and nothing distinguishes the
+two. That is not degrading gracefully; it is a spent credential with no receipt.
+
+⚠️ **This is a correction of what 0.1.0 shipped**, left written down because it
+is the reason the rule exists: those two methods used to return `WalletBreakdown
+| null` and swallow every service failure. Measured against a dead port on
+2026-08-30, a timeout on a metered route returned `null`.
+
+A loud failure after paying is recoverable — retry, log, or claim. A silent
+`null` is not. So no flag can buy the right to swallow it, `failOpen: true`
+included: availability is your preference, a settled payment is a fact.
+
+```ts
+import { failedAfterPaying } from 'uvd-describe-sdk';
+
+try {
+  const detail = await describe.walletBreakdown(wallet);
+} catch (err) {
+  if (failedAfterPaying(err)) {
+    // A signed envelope had already left. err.payment tells you how bad:
+    //   settlement: 'settled'  -> proof: err.payment.receipt is the tx hash
+    //   settlement: 'unknown'  -> the SDK cannot tell. Reconcile, do not assume
+    reconcile(err.payment.receipt, err.payment.amount, err.payment.token);
+  } else {
+    // Nothing was transmitted: a 402 with no payer, a DO_NOT_PAY, a 404, a
+    // payer that declined. You spent nothing — retry freely.
+  }
+}
+```
+
+`settlement` is never `'not settled'`, and that omission is deliberate: an
+unhandled 500 is rendered above the paywall middleware and carries no receipt
+even though the money moved, and `fetch` rejects identically whether the request
+bytes were written or not. `'unknown'` means *ask the chain*, not *nothing
+happened*.
 
 ---
 
@@ -182,7 +234,7 @@ const describe = new DescribeClient({
   payer: payerFromX402Client(x402),
 });
 
-const detail = await describe.walletBreakdown(wallet);
+const detail = await describe.walletBreakdown(wallet);   // never null — it throws
 detail.payment;   // { receipt: 'rcpt_…', reused: false }
 ```
 
@@ -200,6 +252,11 @@ What happens under the hood, in order:
    EIP-3009 authorization, never touches a key.
 5. Replay the identical request with `X-PAYMENT`, and surface
    `X-Payment-Receipt` / `X-Payment-Reused` as `result.payment`.
+
+Step 4 is the line that changes what a failure means. Everything before it costs
+nothing if it fails; everything after it may have cost real USDC, and those
+failures carry `error.payment` so you never have to guess which side you landed
+on.
 
 Bring your own wallet with `payerFrom(challenge => Promise<string>)` — a browser
 wallet, a custodial signer, a queue that asks a human. No `uvd-x402-sdk` needed.
@@ -280,7 +337,7 @@ cycle.
 
 ```bash
 npm install
-npm test              # offline. 84 tests, no network
+npm test              # offline. 93 tests, no network
 npm run typecheck
 npm run lint
 npm run build

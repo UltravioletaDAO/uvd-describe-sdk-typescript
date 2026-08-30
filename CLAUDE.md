@@ -25,8 +25,8 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. 84 tests in ~0,7 s |
-| `npm run typecheck` | `tsc --noEmit` |
+| `npm test` | vitest, **offline**. 93 tests in ~0,6 s (were 84 before the paid-route fix of 2026-08-30) |
+| `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
 | `npm run smoke` | **real** call to the live API. FREE routes only. Needs `npm run build` first |
@@ -64,7 +64,7 @@ pay, deliberately.
 | Module | Owns, exclusively |
 |---|---|
 | `config.ts` | Every calibrable number and the pinned treasury. Nothing else re-types them |
-| `errors.ts` | The failure taxonomy AND the single predicate that decides what `failOpen` swallows |
+| `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only) and the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`) |
 | `caveats.ts` | The eight codes, as an exported contract. Open union, never closed |
 | `format.ts` | How a score is written down. Two functions, no state |
 | `parse.ts` | Wire JSON → typed. The only place a `null` could be lost, so it is the place to look when one is |
@@ -81,9 +81,22 @@ pay, deliberately.
 3. **The three absences stay distinct**: a returned object with a `null` score
    (no evidence), a `null` return (we could not ask), and a throw (your bug or a
    402). Collapsing any two is the failure mode.
-4. **A fail-open is announced.** `onFailure` fires *before* `null` is returned.
-   Move it below the return and "describe is down" silently becomes "this
-   wallet has no reputation".
+4. **A fail-open is announced.** `onFailure` fires *before* `null` is returned,
+   and **only** when a `null` is returned. Move it below the return and
+   "describe is down" silently becomes "this wallet has no reputation".
+   Corollary since 2026-08-30: the metered methods never call it, because they
+   never return `null`.
+4b. 🔴 **The paid routes never fail open.** `walletBreakdown()` and `agent()`
+   return `WalletBreakdown` / `AgentReputation`, not `| null`, and throw on
+   every failure **including with `failOpen: true` explicitly set**. The line is
+   *was there money in flight*, not *how many methods*. ⚠️ This corrects 0.1.0,
+   which ran them through `guard()` → `failOpenCovers()`: measured 2026-08-30
+   against a dead port, a timeout on a metered route returned `null` while the
+   paywall settles **before** running the query
+   (`describe-net/describenet/paywall.py:1031-1047`) — a spent credential with
+   no receipt. A failure with a signed envelope already in flight carries
+   `error.payment` (`PaymentAttempt`); its **absence** states that nothing was
+   transmitted. `failedAfterPaying()` is the predicate.
 5. **We never sign.** No EIP-3009, no key, no envelope. The payment is
    `uvd-x402-sdk`'s, always — upstream-first. If it lacks something, it is
    added THERE and consumed here. Never patched in this repo.
@@ -91,8 +104,15 @@ pay, deliberately.
    recipient *and* every `accepts[]` entry.
 7. **The built entries have zero runtime imports.** Asserted in CI, not
    promised. It is the whole reason a free-only consumer installs nothing.
-8. **A 404 never reaches a caller as an exception.** `DescribeNotFound` is not
-   exported from `index.ts` for exactly this reason: the rule is structural.
+8. **A 404 never reaches a caller as an exception — on the FREE routes.**
+   ⚠️ Corrected 2026-08-30; the old text read *"A 404 never reaches a caller as
+   an exception. `DescribeNotFound` is not exported from `index.ts` for exactly
+   this reason: the rule is structural"*. It stopped being true when the metered
+   methods lost their `| null`: with no absence value left, a 404 on
+   `walletBreakdown()` / `agent()` arrives as a throw, and the class **is** now
+   exported so `instanceof` works. It is still absence, not failure — same
+   `not_found`, `transient: false`, `serviceFault: false`, and **no `payment`**,
+   because a 404 is read before the challenge is and costs nothing.
 9. **`SDK_VERSION` equals `package.json`.** A test asserts it. A User-Agent that
    lies about its version is worse than none.
 

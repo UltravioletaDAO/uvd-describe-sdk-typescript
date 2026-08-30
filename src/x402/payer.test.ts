@@ -22,7 +22,11 @@ import { payerFrom, payerFromX402Client } from './index';
 
 /** Enough of `X402Client` to satisfy the adapter, and nothing more. */
 function stubX402Client(result: Partial<Awaited<ReturnType<X402Client['createPayment']>>>) {
-  const createPayment = vi.fn(async () => ({
+  // The parameter is declared (and unused) on purpose: without it `vi.fn()`
+  // infers a zero-length tuple for `mock.calls`, and `calls[0][0]` below is a
+  // TS2493 under `tsc -p tsconfig.eslint.json`. Harmless at runtime, but it is
+  // noise in the one gate that proves the paid signatures are not nullable.
+  const createPayment = vi.fn(async (_info: unknown) => ({
     success: true,
     paymentHeader: 'BASE64-PAYLOAD',
     headers: { 'X-PAYMENT': 'BASE64-PAYLOAD' },
@@ -83,7 +87,10 @@ describe('payerFrom — bring your own wallet', () => {
     const result = await client.walletBreakdown('0x1');
 
     expect(server.calls[1].headers['X-PAYMENT']).toBe('signed:0.01');
-    expect(result!.finalScore).toBe(83.0);
+    // No `!`: `walletBreakdown()` is not nullable (the paid routes never fail
+    // open). If it goes back to `| null` this line stops compiling under
+    // `npx tsc --noEmit -p tsconfig.eslint.json`.
+    expect(result.finalScore).toBe(83.0);
   });
 
   it('a payer that throws aborts the call — nothing is replayed', async () => {

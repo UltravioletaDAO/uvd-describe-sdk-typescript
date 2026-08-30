@@ -13,7 +13,15 @@ import {
 import { mockServer, type Route } from './__fixtures__/server';
 import { DescribeClient, type DescribeFailure } from './client';
 import { TREASURY_EVM } from './config';
-import { DescribeError, DescribePaymentRefused, DescribePaymentRequired } from './errors';
+import {
+  DescribeError,
+  DescribeNotFound,
+  DescribePaymentRefused,
+  DescribePaymentRequired,
+  failedAfterPaying,
+  type X402Challenge,
+} from './errors';
+import type { AgentReputation, WalletBreakdown } from './types';
 
 const KNOWN = '0x97cd97cfe21799bacbf39d0a53469e5f82f30996';
 const UNRATED = '0xdead00000000000000000000000000000000beef';
@@ -92,14 +100,32 @@ describe('R4 — no exception for absence', () => {
     ]);
   });
 
-  it('a 404 does not throw with failOpen OFF either — a different axis', async () => {
+  it('a 404 on a FREE route does not throw with failOpen OFF either — a different axis', async () => {
     // failOpen is about THEIR outage. A 404 is about absence. Making the
-    // second depend on the first would put "there is no such agent" behind a
+    // second depend on the first would put "there is no such wallet" behind a
     // switch whose name says nothing about it.
+    const server = mockServer({ '/wallets/0xnope/chains': { status: 404, body: {} } });
+    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
+
+    await expect(client.wallet('0xnope')).resolves.toBeNull();
+  });
+
+  it('a 404 on a PAID route throws instead — there is no null left to return', async () => {
+    // ⚠️ Corrected 2026-08-30. This case used to assert
+    // `client.agent('base', 999999)` RESOLVES to null, and it did, because the
+    // metered methods were `| null`. They no longer are (money rule), so
+    // absence changed clothes here: same `not_found`, same non-transient,
+    // non-serviceFault classification — and, the part that matters, no
+    // `payment`, because a 404 is read before the challenge is. Nothing was
+    // signed, nothing was spent to learn there is no such agent.
     const server = mockServer({ '/reputation/agent/base/999999': { status: 404, body: {} } });
     const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
 
-    await expect(client.agent('base', 999999)).resolves.toBeNull();
+    const err = await client.agent('base', 999999).catch((e) => e);
+
+    expect(err).toBeInstanceOf(DescribeNotFound);
+    expect(err).toMatchObject({ kind: 'not_found', transient: false, serviceFault: false });
+    expect(failedAfterPaying(err)).toBe(false);
   });
 
   it('MOUNTS THE BAD STATE: a 404 must not be lumped in with the other 4xx', async () => {
@@ -353,7 +379,9 @@ describe('metered routes', () => {
         headers: { 'X-Payment-Receipt': 'rcpt_abc123', 'X-Payment-Reused': 'false' },
       },
     });
-    const pay = vi.fn(async () => 'BASE64-X-PAYMENT');
+    // The declared parameter is what makes `pay.mock.calls[0][0]` type-check:
+    // a bare `vi.fn(async () => …)` infers a zero-length argument tuple.
+    const pay = vi.fn(async (_challenge: X402Challenge) => 'BASE64-X-PAYMENT');
     const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay } });
 
     const result = await client.walletBreakdown(KNOWN);
@@ -366,10 +394,30 @@ describe('metered routes', () => {
     expect(server.calls[1].headers['X-PAYMENT']).toBe('BASE64-X-PAYMENT');
     // The two headers the paywall has been emitting since 2026-08-25 and that
     // no client read until now.
-    expect(result!.payment).toEqual({ receipt: 'rcpt_abc123', reused: false });
-    expect(result!.finalScore).toBe(83.0);
-    expect(result!.caveats[0].code).toBe('top-client-share');
-    expect(result!.caveatScope).toBe('full');
+    expect(result.payment).toEqual({ receipt: 'rcpt_abc123', reused: false });
+    expect(result.finalScore).toBe(83.0);
+    expect(result.caveats[0].code).toBe('top-client-share');
+    expect(result.caveatScope).toBe('full');
+  });
+
+  it('the return type is NOT nullable — the compiler is half of this rule', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { body: WALLET_BREAKDOWN },
+      '/reputation/agent/base/1#1': { status: 402, body: CHALLENGE_402 },
+      '/reputation/agent/base/1#2': { body: { network: 'base', agent_id: 1 } },
+    });
+    const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
+
+    // No `!`, no `?.`, no narrowing: if either signature goes back to
+    // `| null` these two lines stop compiling. `npm run typecheck` excludes
+    // test files, so the gate is `npx tsc --noEmit -p tsconfig.eslint.json`,
+    // which includes them — run it if you touch these signatures.
+    const breakdown: WalletBreakdown = await client.walletBreakdown(KNOWN);
+    const agent: AgentReputation = await client.agent('base', 1);
+
+    expect(breakdown.finalScore).toBe(83.0);
+    expect(agent.agentId).toBe('1');
   });
 
   it('reads the challenge from the base64 header, which is where sellers put it', async () => {
@@ -433,7 +481,7 @@ describe('metered routes', () => {
       [`${PATH}#2`]: { body: WALLET_BREAKDOWN },
     });
     const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
-    await expect(client.walletBreakdown(KNOWN)).resolves.not.toBeNull();
+    await expect(client.walletBreakdown(KNOWN)).resolves.toMatchObject({ finalScore: 83.0 });
   });
 
   it('a metered route that answers 200 straight away reports no payment', async () => {
@@ -442,25 +490,251 @@ describe('metered routes', () => {
 
     const result = await client.walletBreakdown(KNOWN);
 
-    expect(result!.payment).toBeNull();
+    expect(result.payment).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R5 corrected (2026-08-30) — the PAID routes never fail open
+//
+// The rule the two SDKs now share: `failOpen` covers a service failure on the
+// FREE routes and nothing else. `walletBreakdown()` and `agent()` throw on
+// everything, because between signing a payment and reading the answer the USDC
+// may already have moved, and a `null` there hides a spend from the caller.
+// ---------------------------------------------------------------------------
+
+describe('R5 — the paid routes never fail open', () => {
+  const PATH = `/reputation/wallet/${KNOWN}`;
+  const AFTER_PAYING: Array<[string, Route]> = [
+    ['http_5xx', { status: 500, body: {} }],
+    ['unreachable', { throws: new TypeError('fetch failed') }],
+    ['unparseable', { notJson: '<html>502 Bad Gateway</html>' }],
+  ];
+
+  it('MOUNTS THE BAD STATE: every service failure after paying THROWS with failOpen ON', async () => {
+    // This is the discriminant test of the whole correction. Put these two
+    // methods back through `guard()` — one line — and every iteration below
+    // resolves to `null` instead of throwing, which is the shipped bug: the
+    // USDC moved (the paywall settles BEFORE running the query) and the caller
+    // is handed the same `null` that means "there was nothing to fetch".
+    for (const [kind, route] of AFTER_PAYING) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: route,
+      });
+      const onFailure = vi.fn();
+      const client = new DescribeClient({
+        fetchImpl: server.fetch,
+        failOpen: true, // ← explicitly ON, and it still must not swallow this
+        onFailure,
+        payer: { pay: async () => 'SIGNED-ENVELOPE' },
+      });
+
+      const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+      expect(err, `${kind} did not throw — a spend was swallowed`).toBeInstanceOf(DescribeError);
+      expect(err.kind).toBe(kind);
+      // A flag about availability cannot buy the right to eat a receipt: the
+      // error is `serviceFault` (failOpen WOULD have covered it) and it still
+      // came out as a throw.
+      expect(err.serviceFault).toBe(true);
+      // And it is not announced through onFailure either: that callback means
+      // "a null was returned instead of an answer", and no null was returned.
+      expect(onFailure).not.toHaveBeenCalled();
+    }
   });
 
-  it('a failure AFTER paying keeps the status so you know what you bought', async () => {
+  it('the same three failures on a FREE route still return null — the line is money, not the method count', async () => {
+    // The other half of the discriminant: if someone "fixes" this by making
+    // everything throw, this goes red. `leaderboard()` and `health()` are free,
+    // and there a loud failure just forces every consumer to write the
+    // try/except this package exists to delete.
+    for (const [kind, route] of AFTER_PAYING) {
+      const server = mockServer({ '/health': route, '/leaderboard': route });
+      const seen: DescribeFailure[] = [];
+      const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+
+      expect(await client.health(), `free health/${kind} should degrade`).toBeNull();
+      expect(await client.leaderboard(), `free leaderboard/${kind} should degrade`).toBeNull();
+      expect(seen.map((f) => f.kind)).toEqual([kind, kind]);
+    }
+  });
+
+  it('agent() obeys the same rule as walletBreakdown() — one policy, both metered routes', async () => {
+    const path = '/reputation/agent/base/42';
+    const server = mockServer({
+      [`${path}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${path}#2`]: { status: 503, body: {} },
+    });
+    const client = new DescribeClient({
+      fetchImpl: server.fetch,
+      failOpen: true,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    await expect(client.agent('base', 42)).rejects.toMatchObject({ kind: 'http_5xx' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The other half: a loud failure is only useful if it says WHICH side of the
+// payment it happened on.
+// ---------------------------------------------------------------------------
+
+describe('post-settlement evidence', () => {
+  const PATH = `/reputation/wallet/${KNOWN}`;
+
+  it('a receipt on the failing response is PROOF the money moved', async () => {
+    // The paywall settles inside `authorize()` and stamps the receipt headers
+    // on whatever response comes back — read 2026-08-30 in
+    // describe-net/describenet/paywall.py:1031-1065. So a 500 carrying
+    // X-Payment-Receipt is a settlement stated by the seller, not a guess.
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: {
+        status: 500,
+        body: {},
+        headers: { 'X-Payment-Receipt': '0xsettlementhash', 'X-Payment-Reused': 'false' },
+      },
+    });
+    const client = new DescribeClient({
+      fetchImpl: server.fetch,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(failedAfterPaying(err)).toBe(true);
+    expect(err.payment).toMatchObject({
+      settlement: 'settled',
+      receipt: '0xsettlementhash',
+      reused: false,
+      status: 500,
+      amount: '0.01',
+      token: 'USDC',
+    });
+    // The message says it too, because the first thing anyone reads is the
+    // message and not the properties.
+    expect(err.message).toContain('settlement: settled');
+  });
+
+  it('no receipt is `unknown`, never "nothing happened"', async () => {
+    // An unhandled 500 is rendered ABOVE the paywall middleware, so the header
+    // line never runs while the settlement already did. Claiming "not settled"
+    // from a missing header would be inventing a fact.
     const server = mockServer({
       [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
       [`${PATH}#2`]: { status: 500, body: {} },
     });
-    const seen: DescribeFailure[] = [];
     const client = new DescribeClient({
       fetchImpl: server.fetch,
-      payer: { pay: async () => 'paid' },
-      onFailure: (f) => seen.push(f),
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
     });
 
-    expect(await client.walletBreakdown(KNOWN)).toBeNull();
-    // 5xx after settlement: their query broke, not our payment. A caller has to
-    // be able to tell that from a 4xx refusal.
-    expect(seen[0]).toMatchObject({ kind: 'http_5xx', transient: true });
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(err.payment).toMatchObject({ settlement: 'unknown', receipt: null, reused: null });
+  });
+
+  it('a timeout with the envelope in flight is the case that CANNOT be narrowed', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { hang: true },
+    });
+    const client = new DescribeClient({
+      fetchImpl: server.fetch,
+      timeoutMs: 20,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(err.kind).toBe('timeout');
+    // No status: no answer ever arrived. `fetch` rejects the same way whether
+    // the request bytes were written or not, so `unknown` is the honest word.
+    expect(err.payment).toEqual({
+      settlement: 'unknown',
+      receipt: null,
+      reused: null,
+      amount: '0.01',
+      token: 'USDC',
+      payTo: TREASURY_EVM,
+    });
+  });
+
+  it('a 200 with an unreadable body is the worst case, and it settled', async () => {
+    // Easiest one to forget: they charged, answered 200, and the bytes are
+    // garbage. The old code returned `null` here.
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { notJson: '<html>gateway</html>', headers: { 'X-Payment-Receipt': '0xabc' } },
+    });
+    const client = new DescribeClient({
+      fetchImpl: server.fetch,
+      failOpen: true,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(err.kind).toBe('unparseable');
+    expect(err.payment).toMatchObject({ settlement: 'settled', receipt: '0xabc', status: 200 });
+  });
+
+  it('MOUNTS THE BAD STATE: a failure BEFORE the envelope leaves carries no payment at all', async () => {
+    // The absence of `error.payment` is itself the statement "nothing was
+    // transmitted, so nothing could have settled". If it were stamped
+    // unconditionally, every 402-with-no-payer would read as a possible spend
+    // and the field would mean nothing.
+    const before: Array<[string, () => Promise<unknown>]> = [];
+
+    const noPayer = mockServer({ [PATH]: { status: 402, body: CHALLENGE_402 } });
+    before.push([
+      'payment_required',
+      () => new DescribeClient({ fetchImpl: noPayer.fetch }).walletBreakdown(KNOWN),
+    ]);
+
+    const stranger = mockServer({
+      [PATH]: { status: 402, body: { ...CHALLENGE_402, recipient: '0xstranger', recipients: {}, accepts: [] } },
+    });
+    before.push([
+      'payment_refused',
+      () =>
+        new DescribeClient({
+          fetchImpl: stranger.fetch,
+          payer: { pay: async () => 'never' },
+        }).walletBreakdown(KNOWN),
+    ]);
+
+    const down = mockServer({ [PATH]: { status: 503, body: {} } });
+    before.push([
+      'http_5xx on the FIRST ask',
+      () =>
+        new DescribeClient({
+          fetchImpl: down.fetch,
+          payer: { pay: async () => 'never' },
+        }).walletBreakdown(KNOWN),
+    ]);
+
+    const declined = mockServer({ [PATH]: { status: 402, body: CHALLENGE_402 } });
+    before.push([
+      'the payer itself declined',
+      () =>
+        new DescribeClient({
+          fetchImpl: declined.fetch,
+          payer: {
+            pay: async () => {
+              throw new Error('user declined');
+            },
+          },
+        }).walletBreakdown(KNOWN),
+    ]);
+
+    for (const [label, run] of before) {
+      const err = await run().catch((e) => e);
+      expect(err, `${label} did not throw`).toBeInstanceOf(Error);
+      expect(failedAfterPaying(err), `${label} was marked as a possible spend`).toBe(false);
+    }
   });
 });
 

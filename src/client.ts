@@ -21,6 +21,34 @@
  * `client.test.ts` asserts a failure is always announced before `null` is
  * returned.
  *
+ * ## 🔴 The paid routes never fail open — added 2026-08-30, and it is a money rule
+ *
+ * `wallet()`, `leaderboard()` and `health()` are free, so absence (2) costs
+ * nothing and a `null` is the kindest answer: without it every consumer writes
+ * the same try/catch around a lookup, which is the duplication this package
+ * exists to delete.
+ *
+ * `walletBreakdown()` and `agent()` are NOT free, and there they return no
+ * absence value at all — they throw, always, **including with `failOpen: true`
+ * set explicitly**. The line is not "how many methods", it is *was there money
+ * in flight*.
+ *
+ * ⚠️ **This is a correction of what shipped, left written because it is the
+ * whole reason this rule exists.** Until 2026-08-30 these two returned
+ * `| null` and ran their failures through `failOpenCovers()`, which is `true`
+ * for every `serviceFault`. Measured against a dead port that same day: a
+ * timeout on a metered route returned `null`. The paywall settles **before**
+ * running the query (`describe-net/describenet/paywall.py:1031-1047`), so that
+ * `null` could be handed back with the USDC already moved — and nothing in it
+ * distinguished "I paid and it fell over" from "there was nothing to fetch".
+ * That is not degrading gracefully, it is a spent credential with no receipt.
+ *
+ * A loud failure after paying is recoverable: the caller can retry, log or
+ * claim. A silent `null` is not, and no flag the caller sets can buy the right
+ * to swallow a receipt — availability is a preference, a settled payment is a
+ * fact. What the exception carries instead is `error.payment` (see
+ * `errors.ts::PaymentAttempt`) and `failedAfterPaying()` reads it.
+ *
  * ## What this client deliberately does NOT do
  *
  * **No cache.** MeshRelay has one (a `Map`, 12-minute TTL) and needs it: it
@@ -52,6 +80,7 @@ import {
   userAgent,
 } from './config';
 import {
+  attachPayment,
   DescribeError,
   DescribeHTTPError,
   DescribeNotFound,
@@ -61,6 +90,7 @@ import {
   DescribeUnparseable,
   DescribeUnreachable,
   failOpenCovers,
+  type PaymentAttempt,
   type X402Challenge,
 } from './errors';
 import {
@@ -134,12 +164,20 @@ export interface DescribeClientConfig {
    * `true` — a describe.net-side failure returns `null` and calls `onFailure`.
    * `false` — the same failure throws a typed `DescribeError`.
    *
+   * **Scope: the free routes only** — `wallet()`, `leaderboard()`, `health()`.
+   * `walletBreakdown()` and `agent()` ignore this flag in both positions and
+   * always throw; see the header of this file for why money removes the choice.
+   *
    * Either way a 4xx that is the CALLER's fault still throws: `failOpen`
    * protects you from their outage, not from your own bug.
    */
   failOpen?: boolean;
   /**
-   * Where a swallowed failure goes. Called before `null` is returned, always.
+   * Where a swallowed failure goes. Called before `null` is returned, always —
+   * and **only** then. The invariant reads in one line: `onFailure` fires if and
+   * only if a method hands back `null` instead of an answer. A failure that
+   * reaches you as a throw is not announced here, because you are already
+   * holding it; the paid routes therefore never call this at all.
    *
    * Leaving this unset with `failOpen: true` is the one configuration this
    * package will not defend: it converts "describe is down" into "this wallet
@@ -269,28 +307,35 @@ export class DescribeClient {
    * uses: what gets paid is what the live challenge says. We never type a
    * price into a code path.
    *
+   * 🔴 **Not nullable, and never fail-open** — not even with `failOpen: true`.
+   * There is money in flight here, and a swallowed failure is a spent
+   * credential with no receipt. Every failure arrives as a typed throw, and one
+   * that happened after the envelope left carries `error.payment`
+   * (`failedAfterPaying()`). Note this includes a 404: it is still absence and
+   * still costs nothing (it is checked before the challenge is read), but with
+   * no `| null` left there is nowhere to degrade it to.
+   *
    * Without a `payer`, throws `DescribePaymentRequired` with the challenge
    * attached — asking is free and is the intended first move, so you can read
    * the price without paying.
    */
-  async walletBreakdown(address: string): Promise<WalletBreakdown | null> {
+  async walletBreakdown(address: string): Promise<WalletBreakdown> {
     const path = `/reputation/wallet/${encodeURIComponent(address)}`;
-    return this.guard(path, async () => {
-      const { body, payment } = await this.getPaidJson(path);
-      return parseWalletBreakdown(body, payment);
-    });
+    const { body, payment } = await this.getPaidJson(path);
+    return parseWalletBreakdown(body, payment);
   }
 
   /**
    * `GET /reputation/agent/{network}/{agentId}` — **metered, $0.02**. One
    * ERC-8004 identity, down to the individual ratings.
+   *
+   * 🔴 Same money rule as `walletBreakdown()`: not nullable, never fail-open,
+   * throws on everything including a 404 for an agent id that does not exist.
    */
-  async agent(network: string, agentId: string | number): Promise<AgentReputation | null> {
+  async agent(network: string, agentId: string | number): Promise<AgentReputation> {
     const path = `/reputation/agent/${encodeURIComponent(network)}/${encodeURIComponent(String(agentId))}`;
-    return this.guard(path, async () => {
-      const { body, payment } = await this.getPaidJson(path);
-      return parseAgentReputation(body, payment);
-    });
+    const { body, payment } = await this.getPaidJson(path);
+    return parseAgentReputation(body, payment);
   }
 
   // -------------------------------------------------------------------------
@@ -298,8 +343,17 @@ export class DescribeClient {
   // -------------------------------------------------------------------------
 
   /**
-   * The fail-open gate. Every network method goes through exactly one of these
-   * so the rule cannot drift between methods.
+   * The fail-open gate — **for the free routes, and only for them**.
+   *
+   * ⚠️ Corrected 2026-08-30. The old comment here read *"every network method
+   * goes through exactly one of these so the rule cannot drift between
+   * methods"*, and the intent was right while the scope was wrong: routing the
+   * paid methods through it is what let a post-settlement timeout come back as
+   * `null`. The rule that must not drift is R5, and R5 has a term this function
+   * cannot see. So the paid methods do not call it — deliberately, and a test
+   * named `MOUNTS THE BAD STATE` goes red if anyone puts them back.
+   *
+   * Whoever adds the sixth method: free ⇒ wrap it here; metered ⇒ do not.
    */
   private async guard<T>(path: string, run: () => Promise<T>): Promise<T | null> {
     try {
@@ -378,6 +432,13 @@ export class DescribeClient {
    * guide says it in the imperative — *"verify who you are about to pay — do
    * this every time"* — because the challenge arrives over the same network
    * that could be lying to you, and it names its own recipient.
+   *
+   * There is one line in this function that changes what a failure MEANS, and
+   * it is marked: everything above `payer.pay()` returning is a failure that
+   * cost nothing, everything below it may have cost real USDC. Failures below
+   * it are stamped with a `PaymentAttempt` so the caller does not have to infer
+   * which side of that line they landed on. Nothing above it is stamped, and
+   * that asymmetry IS the signal — see `errors.ts::PaymentAttempt`.
    */
   private async getPaidJson(
     path: string,
@@ -413,27 +474,71 @@ export class DescribeClient {
 
     this.assertPayableTo(challenge);
 
+    // Nothing above this line has spent anything: the payer may still refuse,
+    // and a signature that never leaves the payer moves no money — the seller
+    // is what settles it. A throw from `pay()` is the caller's own payer
+    // talking, so it is not annotated and not translated.
     const header = await this.payer.pay(challenge);
-    const second = await this.request(path, { 'X-PAYMENT': header });
+
+    // ─────────── BELOW THIS LINE A SIGNED ENVELOPE IS IN FLIGHT ───────────
+    const terms = {
+      amount: typeof challenge.amount === 'string' ? challenge.amount : undefined,
+      token: typeof challenge.token === 'string' ? challenge.token : undefined,
+      payTo: typeof challenge.recipient === 'string' ? challenge.recipient : undefined,
+    };
+
+    let second: Response;
+    try {
+      second = await this.request(path, { 'X-PAYMENT': header });
+    } catch (error) {
+      // No answer at all — timeout or dead socket. `fetch` rejects identically
+      // whether the request bytes were written or not, so this is exactly the
+      // case that CANNOT be narrowed: `unknown`, said out loud.
+      throw attachPayment(error, { settlement: 'unknown', receipt: null, reused: null, ...terms });
+    }
+
+    const receipt = second.headers.get('X-Payment-Receipt');
+    const reused = second.headers.get('X-Payment-Reused');
+    const attempt: PaymentAttempt = {
+      // A receipt is the settlement transaction hash, put there by the seller:
+      // proof, not inference. Its absence proves nothing — an unhandled 500 is
+      // rendered above the paywall middleware and never gets the header.
+      settlement: receipt ? 'settled' : 'unknown',
+      receipt,
+      reused: reused === null ? null : reused.toLowerCase() === 'true',
+      status: second.status,
+      ...terms,
+    };
 
     if (!second.ok) {
       // 🔴 Money may already be gone here: the authorization was signed and the
       // paywall settles BEFORE running the query. The status is preserved so a
       // caller can tell "they refused the payment" (4xx) from "we paid and
       // their query blew up" (5xx) — different conversations to have with them.
-      throw new DescribeHTTPError(
-        second.status,
-        `GET ${path} -> HTTP ${second.status} AFTER paying. If a receipt was issued the ` +
-          'payment may have settled; the same receipt unlocks only this byte-identical resource.',
+      throw attachPayment(
+        new DescribeHTTPError(
+          second.status,
+          `GET ${path} -> HTTP ${second.status} AFTER paying (settlement: ${attempt.settlement}` +
+            `${receipt ? `, receipt ${receipt}` : ''}). Read \`error.payment\` before retrying: ` +
+            'the same receipt unlocks only this byte-identical resource.',
+        ),
+        attempt,
       );
     }
 
+    let body: unknown;
+    try {
+      body = await this.readJson(second, path);
+    } catch (error) {
+      // The worst of the set and the easiest to forget: a 200 whose body is
+      // garbage. It settled — the receipt is right there — and the caller got
+      // nothing for it. Swallowing THIS was the old behaviour.
+      throw attachPayment(error, attempt);
+    }
+
     return {
-      body: await this.readJson(second, path),
-      payment: {
-        receipt: second.headers.get('X-Payment-Receipt'),
-        reused: (second.headers.get('X-Payment-Reused') ?? '').toLowerCase() === 'true',
-      },
+      body,
+      payment: { receipt, reused: (reused ?? '').toLowerCase() === 'true' },
     };
   }
 
