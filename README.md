@@ -175,10 +175,18 @@ apply to the metered routes at all:
 | `payment_refused` | — | **throws** | no | `DO_NOT_PAY` — the challenge named a treasury that is not ours |
 | `partner_unsigned` | **throws** | **throws** | no | partner mode on and the signature could not be produced. **Yours**, and it throws on the free routes too — an unsigned partner client is an anonymous client, and an anonymous client pays |
 | `partner_rejected` | — | **throws** | no | you signed and were charged anyway: the free rail is off. Thrown *before* the payer, so nothing was spent |
+| `malformed_hash` | announced | **announced** | no | a hash field was not a hash, so it was dropped. **Never thrown, on any route** — the read succeeded and the rest of it is good. See [Malformed hashes](#malformed-hashes-are-dropped-marked-and-announced) |
 
 With `failOpen: false` the free routes throw instead. `not_found` on a free
 route never throws either way: `failOpen` is about *their outage*, absence is a
 different axis.
+
+**`onFailure` announces everything this client swallowed and nothing it hands
+you**: a `null` returned instead of an answer, and a field dropped because it
+was not what it claimed to be. A failure that arrives as a throw is never
+announced there — you are already holding it. If you only page on outages,
+`malformed_hash` filters out in one line; it is `transient: false` and
+`serviceFault: false`, so `failOpenCovers()` refuses it too.
 
 ### 🔴 Why the metered routes never fail open
 
@@ -348,6 +356,121 @@ server already knows which is which. Measured cost of signing everything:
 
 ---
 
+## Jitter, on by default
+
+Every request waits a random `[0, 400)` ms first. **That is on unless you turn
+it off**, and it is the one thing this package spends without being asked, so
+here is the argument:
+
+* The number is **KarmaKadabra's**, not ours — `random.uniform(0, 0.4)` before
+  every read, contributed 2026-08-30 with the measurement behind it: 27 agents
+  wake on one EventBridge schedule and hit a rate limit **shared** with every
+  other consumer. *"Sin jitter, un enjambre es un DDoS educado."*
+* It defaults ON because **the cost of getting it wrong does not land on
+  whoever gets it wrong.** The shared limit has no per-partner bucket, so an
+  unjittered swarm is paid for by the other consumer, who gets the 429 and has
+  no lever. And opt-in is undiscoverable by construction: you find out you
+  needed jitter from somebody else's incident.
+* At most 400 ms, ~200 ms on average, against a 30 000 ms timeout and a
+  provider cold start measured at 15,2 s.
+
+```ts
+new DescribeClient({ jitterMs: 0 });   // off — do this in your unit tests
+new DescribeClient({ jitterMs: 1200 }); // wider, for a bigger fleet
+```
+
+It fires before **every** request, so a metered call — 402, pay, replay —
+sleeps twice. Once per call would disperse the first arrival and let the rest
+out in a pack, which is the problem it came to solve.
+
+It is **not** backoff: jitter spreads a herd that has not asked for anything
+yet, backoff yields to a service that already said no. This package has no
+retry; build one on `error.transient` and give *that* the backoff.
+
+> **Python parity.** `uvd-describe-sdk` for Python takes `jitter=0.4`, in
+> **seconds**, because its `timeout` is in seconds while this one's is
+> `timeoutMs`. Same value, same policy, different unit — each language keeps
+> its own, rather than one of them carrying a lying name.
+
+---
+
+## Malformed hashes are dropped, marked, and announced
+
+Contributed by **KarmaKadabra** from the finding they call *"el 200 sin tx"*:
+
+> *"Un 200 que no hizo la cosa es peor que un 503, porque el cliente lo toma por
+> bueno: si nosotros no chequeáramos el tx, habríamos contado 14 ratings que no
+> existen."*
+
+Every hash field is shape-checked — `tx_hash`, `feedback_hash`, `revoked_tx`,
+`snapshot.inputs_digest`, and the `X-Payment-Receipt`. A value that is not
+shaped like a hash is set to `null`, its name is recorded, and `onFailure` is
+told. **It never throws**: one bad accessory field must not destroy an answer
+you already paid for.
+
+🔴 **Absent and malformed are not the same thing.** The `null` is identical in
+both cases and only the mark separates them:
+
+```ts
+const agent = await describe.agent('base', 42);
+
+agent.ratings[0].txHash;          // null in BOTH cases
+agent.ratings[0].malformedHashes; // []          → it did not come (normal:
+                                  //                "null until the log scan
+                                  //                reaches this entry")
+                                  // ['tx_hash'] → garbage came. THIS one.
+```
+
+The value as served survives in `raw`, and the notice arrives on the channel you
+already watch:
+
+```ts
+onFailure: (f) => {
+  if (f.kind === 'malformed_hash') return report(f.error.fields); // not an outage
+  pageSomeone(f);
+};
+```
+
+The shape check is the **union** of what the index really emits — `0x` + 64 hex
+on the EVM chains, **base58 on Solana**, a bare 64-hex digest for
+`inputs_digest`, and the literal `pending` that the receipt header is documented
+to carry. An EVM-only regex would have flagged every Solana rating in the index,
+and an alarm that screams about good data is worse than no alarm.
+
+`buildSha` is deliberately **not** checked: a legitimate deploy can stamp
+`<sha>-dirty`, and validating it would scream forever about a good build.
+
+---
+
+## Counting distinct raters
+
+```ts
+import { resolveDistinctRaters } from 'uvd-describe-sdk';
+
+const raters = resolveDistinctRaters(await describe.wallet(address)); // number | null
+```
+
+Contributed by **MeshRelay**, who also asked for the rename: *"`maxDistinctRaters`
+invita a creer que el máximo es la respuesta correcta, cuando es el último
+recurso."*
+
+🔴 **Do not rebuild this number from the per-chain rows.** Both ways are wrong,
+in opposite directions, and both are measured — on the live wallet
+`0xcc28cee3a1433493de119efe8cd218ff7c0e4821`, read 2026-08-30:
+
+| | Value | |
+|---|---|---|
+| `distinct_raters` (global) | **129** | the answer |
+| per-chain **maximum** (base 113, ethereum 21) | 113 | 16 short |
+| per-chain **sum** | 134 | 5 over — it double-counts anyone who rated on two chains |
+
+The global figure is `COUNT(DISTINCT client)` over every chain and every
+identity. `resolveDistinctRaters` returns it when it is there and falls back to
+the maximum only for a cached response predating 2026-08-28, when the field
+started being served. `null` when there is nothing to count — **never `0`**.
+
+---
+
 ## What this package deliberately does not do
 
 **No `getScore(): number`.** Every result carries `policyVersion`, `caveats[]`
@@ -387,6 +510,7 @@ holds no key.
 | `product` | — | Appended to the `User-Agent`. The rate limit is shared with no per-partner bucket, so the UA is what makes your share attributable. The limit itself is not repeated here — the `RateLimit-Policy` response header is the authority (it read `50;w=1;burst=40` on 2026-08-30) |
 | `failOpen` | `true` | |
 | `onFailure` | — | Pass it. See above |
+| `jitterMs` | `400` | **On by default.** A random `[0, jitterMs)` pause before **every** request. KarmaKadabra's measurement on a fleet of 27: *"27 agentes despiertan al MISMO tiempo por EventBridge y pegan simultáneo contra su límite de rps COMPARTIDO"*. `0` turns it off; a garbage value falls back to this default, never to off. See [Jitter](#jitter-on-by-default) |
 | `payer` | — | |
 | `expectedPayTo` | the pinned treasury | Override only if you verified a rotation out of band |
 | `partner` | — | The [partner rail](#not-paying-the-partner-rail). Signs every request; metered routes are free if your address is allowlisted |

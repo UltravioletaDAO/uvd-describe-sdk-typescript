@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **111 tests in ~0,9 s** (were 93 before the partner rail of 2026-08-30, 84 before the paid-route fix of the same day) |
+| `npm test` | vitest, **offline**. **168 tests in ~1,8 s** (re-measured 2026-08-30 after absorbing the three ecosystem contributions; were 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
@@ -52,8 +52,12 @@ pay, deliberately.
   index.ts ──> client.ts ──┼──> parse.ts ──> types.ts
    (public)    (fetch,      │     (wire→typed)   (hand-written + schema gate)
                 failOpen,   ├──> errors.ts   (the taxonomy + failOpenCovers)
-                402 flow)   ├──> caveats.ts  (the 8 frozen codes)
-                            └──> format.ts   (R8: 83.0 -> "83")
+                402 flow,   ├──> caveats.ts  (the 8 frozen codes)
+                jitter)     ├──> format.ts   (R8: 83.0 -> "83")
+                            ├──> jitter.ts   (the sleep before every request)
+                            ├──> hashes.ts   (is this shaped like a hash?)
+                            └──> raters.ts   (distinct raters, without the two
+                                              wrong reconstructions)
 
   x402/index.ts     pays a 402. Knows uvd-x402-sdk by `import type` ONLY, so the
                     built JS imports NOTHING.
@@ -70,6 +74,9 @@ pay, deliberately.
 | `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only) and the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`) |
 | `caveats.ts` | The eight codes, as an exported contract. Open union, never closed |
 | `format.ts` | How a score is written down. Two functions, no state |
+| `jitter.ts` | The draw and the only `setTimeout` in the package. Pure `(maxMs, random) → ms`, so its bounds are tested without a clock. KarmaKadabra's 0,4 s, `Math.random` and **never** a CSPRNG |
+| `hashes.ts` | Whether a string is shaped like an on-chain id — the UNION of EVM hex, Solana base58 and a bare digest, plus the receipt's `pending`. Also the rule about which fields are NOT checked (`build_sha`) and why |
+| `raters.ts` | One function. Its docstring is the deliverable: the per-chain maximum understates and the per-chain sum double-counts, both measured |
 | `parse.ts` | Wire JSON → typed. The only place a `null` could be lost, so it is the place to look when one is |
 | `client.ts` | HTTP, timeouts, fail-open, the 402 dance, the treasury check |
 | `x402/index.ts` | The payer adapter. Type-only import — nothing at runtime |
@@ -85,11 +92,21 @@ pay, deliberately.
 3. **The three absences stay distinct**: a returned object with a `null` score
    (no evidence), a `null` return (we could not ask), and a throw (your bug or a
    402). Collapsing any two is the failure mode.
-4. **A fail-open is announced.** `onFailure` fires *before* `null` is returned,
-   and **only** when a `null` is returned. Move it below the return and
-   "describe is down" silently becomes "this wallet has no reputation".
-   Corollary since 2026-08-30: the metered methods never call it, because they
-   never return `null`.
+4. **Everything swallowed is announced.** `onFailure` fires for the two things
+   that would otherwise disappear without a trace: a `null` handed back instead
+   of an answer (fired *before* the `null`, free routes only) and a hash field
+   dropped because it was not a hash (`kind: 'malformed_hash'`, metered routes).
+   Move the first below the return and "describe is down" silently becomes "this
+   wallet has no reputation"; drop the second and a 200 that did not do the thing
+   reads as a 200.
+   ⚠️ **Restated 2026-08-30 and the old wording is left because someone will look
+   for it**: it read *"fires if and only if a `null` is returned… the metered
+   methods never call it"*. That described the only case that existed rather than
+   the rule, which is that nothing vanishes quietly — and a field that vanished
+   out of a 200 is exactly as invisible as a silent fail-open. What has NOT
+   changed: a failure that reaches the caller as a throw is never announced here,
+   and the metered routes still never fail open (4b). A consumer who pages only
+   on outages filters one line: `if (f.kind === 'malformed_hash') return;`.
 4b. 🔴 **The paid routes never fail open.** `walletBreakdown()` and `agent()`
    return `WalletBreakdown` / `AgentReputation`, not `| null`, and throw on
    every failure **including with `failOpen: true` explicitly set**. The line is
@@ -144,6 +161,24 @@ pay, deliberately.
    because a 404 is read before the challenge is and costs nothing.
 9. **`SDK_VERSION` equals `package.json`.** A test asserts it. A User-Agent that
    lies about its version is worse than none.
+10. **A hash field is checked by SHAPE, and absent ≠ malformed.** Added
+   2026-08-30 from KarmaKadabra's *"el 200 sin tx"*. A value that is not shaped
+   like an on-chain id becomes `null`, its wire name goes into the owning
+   object's `malformedHashes`, and `onFailure` says so (4). It never throws: one
+   accessory field must not destroy an answer that was paid for. It never passes
+   through either — that is the bug. **Read the list, not the `null`**: a `null`
+   with an empty list means the index has not written it yet, which is documented
+   and normal.
+   🔴 The predicate is the UNION of what the index really emits, never one EVM
+   regex — Solana serves base58 in the same `tx_hash` column
+   (`solana_indexer.py:436` → the INSERT at `indexer.py:153-157`), so an
+   EVM-only check would flag every Solana rating in the index. **The false
+   positive is the expensive direction**: an alarm that screams about good data
+   gets ignored, and then it is silent on the day it is right. Same rule decides
+   what is NOT checked: `build_sha` can legitimately read `<sha>-dirty`
+   (`scripts/build_lambda_zip.py:64`), so nothing validates it. Validate the ids
+   a caller carries somewhere to verify; leave alone the strings that describe a
+   build.
 
 ## Measured traps
 
@@ -195,6 +230,27 @@ the status code would call a passing check a failure forever. Fix: set
 `process.exitCode` and let Node drain undici's sockets.
 What separates it from its neighbour: the output says `OK` and the exit code
 says failure. If the two disagree, it is teardown, not the check.
+
+**🔴 A hash validator that only knows `0x` + 64 hex flags an entire chain.**
+Measured 2026-08-30 from both ends. From the writer:
+`describe-net/describenet/solana_indexer.py:436` puts a base58 **signature**
+into the `tx_hash` column of the INSERT at `indexer.py:153-157` — the same
+column the EVM indexer fills with `0x…`, because Solana writes to the same
+tables on purpose. From the wire: `GET /feed?network=solana&limit=4` served
+87- and 88-character strings with no prefix. So `hashes.ts` validates the UNION
+of the shapes and its tests use signatures pulled off the live feed, never
+synthetic ones.
+
+Reproduce: `curl -s "https://api.describe.net/feed?network=solana&limit=2"` and
+read `tx_hash`.
+What separates it from its neighbour: this failure is a FALSE POSITIVE — the
+alarm fires on good data, forever, until somebody learns to ignore it, and then
+it is silent on the day it is right. Its neighbour is the same shape one field
+over and lands on the opposite verdict: `build_sha` is deliberately NOT
+validated, because `describe-net/scripts/build_lambda_zip.py:64` stamps
+`sha + ("-dirty" if sucio else "")` and a legitimate deploy can publish
+`<40 hex>-dirty`. Before adding a field to the checked set, ask what its
+WEIRDEST legitimate value looks like — not what its normal one does.
 
 **`/leaderboard` takes no parameters.** `?limit=2` answers **422**
 `leaderboard_takes_no_params`. Paging is the metered `/leaderboard/page`.
