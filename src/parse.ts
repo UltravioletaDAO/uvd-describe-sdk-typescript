@@ -20,6 +20,32 @@
  *    absence of a value and a value that is nonsense are different facts, and
  *    collapsing them is the failure this file exists to prevent. See
  *    `hashes.ts`, and `client.ts` for how the fact reaches the caller.
+ * 5. **A payload from the wrong door fails LOUD — in BOTH directions.** Added
+ *    2026-08-31 from mesh's migration review (meshrelay; spec in
+ *    `meshrelayserv/describenet.js@04f2ecf`), which found rule 3 broken by its
+ *    own parsers: `wallet` is a string in every shape this API serves AND in
+ *    every shape this SDK returns, so the essential-shape check alone let
+ *    wrong inputs "succeed" into exactly the object-full-of-nulls rule 3
+ *    declares impossible — the FREE route's body fed to `parseWalletBreakdown`
+ *    (`finalScore: null`, `weightedScore: null`, `perChain: {}`, reading as
+ *    "paid and got nothing"), and a result that was ALREADY parsed fed back in
+ *    (every snake_case lookup misses, all nulls, in silence). The guards are
+ *    key-based — a marker key by PRESENCE, never by value — and each one names
+ *    the door the caller actually wanted: `global_score` without `final_score`
+ *    is the free route's body and belongs to `parseWalletReputation`;
+ *    `final_score` without `global_score` is the METERED route's body and
+ *    belongs to `parseWalletBreakdown`; a camelCase key (`globalScore`,
+ *    `finalScore`, `weightedScore`) is OUR output, and output does not go back
+ *    in — `client.wallet()` already parses, and the wire payload survives in
+ *    `.raw` for whoever needs to re-read it.
+ *    ⚠️ CORRECTED 2026-08-31, same day, by the symmetry review against the
+ *    Python twin: as first written this rule guarded only ONE wrong door
+ *    (free body → `parseWalletBreakdown`) and the code matched the text — the
+ *    metered body fed to `parseWalletReputation` still "succeeded" into
+ *    `globalScore: null`, `chains: []`, in silence, while both trees claimed
+ *    mirror. The twin guards both directions
+ *    (`models.py::parse_wallet_reputation`); now so does this file, and
+ *    `parse.test.ts` mounts the bad state for each.
  */
 
 import { CAVEAT_SCOPE_FREE, CAVEAT_SCOPE_METERED, type Caveat } from './caveats';
@@ -232,6 +258,35 @@ export function parseWalletReputation(payload: unknown): WalletReputation {
   if (!isObj(payload) || typeof payload.wallet !== 'string') {
     throw new DescribeUnparseable('wallet-chains response is missing its essential shape (wallet)');
   }
+  // Rule 5: our own output does not go back in. The wire carries `global_score`
+  // (snake_case); `globalScore` exists only in what THIS function returned, and
+  // re-parsing that used to "succeed" into all-nulls in silence (mesh, 2026-08-31).
+  // `finalScore`/`weightedScore` are the OTHER parser's output crossing the door
+  // (a parsed WalletBreakdown fed here slipped through until the symmetry
+  // re-check of 2026-08-31 caught it in BOTH twins).
+  if ('globalScore' in payload || 'finalScore' in payload || 'weightedScore' in payload) {
+    throw new DescribeUnparseable(
+      'this payload is already parsed (it carries a camelCase score key, which the wire ' +
+        'never does): do not parse twice. `client.wallet()` already parses, and the payload as ' +
+        'served is in `.raw`.',
+    );
+  }
+  // Rule 5, the inverse door — added 2026-08-31 by the symmetry review against
+  // the Python twin: `models.py::parse_wallet_reputation` guards this and this
+  // file claimed mirror while it did not. Fed the METERED route's body, this
+  // parser used to "succeed" into `globalScore: null`, `chains: []`, in
+  // silence — turning a score that exists and was PAID for into "not yet
+  // rated". The marker is the key pair by PRESENCE, never by value
+  // (`final_score: null` must still fire), so a future payload carrying both
+  // stays additive-tolerant and does not trip it.
+  if ('final_score' in payload && !('global_score' in payload)) {
+    throw new DescribeUnparseable(
+      "this is the METERED route's payload (`GET /reputation/wallet/{wallet}` — it carries " +
+        'a top-level `final_score` and no `global_score`): it goes to parseWalletBreakdown, not ' +
+        'parseWalletReputation. Parsing it here would answer nulls for a score the metered ' +
+        'route DID serve.',
+    );
+  }
   const rows = Array.isArray(payload.chains) ? payload.chains : [];
   const chains: WalletChainRow[] = rows.filter(isObj).map((row) => ({
     network: String(row.network ?? ''),
@@ -267,6 +322,23 @@ export function parseWalletBreakdown(
 ): WalletBreakdown {
   if (!isObj(payload) || typeof payload.wallet !== 'string') {
     throw new DescribeUnparseable('wallet-breakdown response is missing its essential shape (wallet)');
+  }
+  // Rule 5, twice — both guards close a hole mesh measured (2026-08-31): this
+  // function used to accept both of these and answer an object full of nulls.
+  if ('finalScore' in payload || 'weightedScore' in payload || 'globalScore' in payload) {
+    throw new DescribeUnparseable(
+      'this payload is already parsed (it carries a camelCase score key, which the wire never ' +
+        'does — `globalScore` means it is the OTHER parser\'s output): do not parse twice. The ' +
+        'payload as served is in `.raw`.',
+    );
+  }
+  if ('global_score' in payload && !('final_score' in payload)) {
+    throw new DescribeUnparseable(
+      'this is the FREE route\'s payload (`GET /wallets/{wallet}/chains` — it carries ' +
+        '`global_score` and no top-level `final_score`): it goes to parseWalletReputation, not ' +
+        'parseWalletBreakdown. Parsing it here would answer nulls for scores the free route ' +
+        'never served.',
+    );
   }
   return {
     wallet: payload.wallet,

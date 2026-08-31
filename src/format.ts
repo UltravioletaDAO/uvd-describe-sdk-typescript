@@ -45,6 +45,15 @@
  *
  * A non-finite input (a `NaN` from a malformed payload) is also `null`: a
  * number we cannot name is not a number we may put describe.net's name on.
+ *
+ * 🔴 **This returns a STRING, and the homonym trap is measured** (mesh,
+ * meshrelay migration review 2026-08-31; spec in
+ * `meshrelayserv/describenet.js@04f2ecf`): their pre-SDK code had a local
+ * `formatScore` that returned a NUMBER, so swapping the import compiles clean,
+ * every call site keeps working — and every score that flows into a JSON
+ * payload silently turns from `83` into `"83"`, one serialization away from
+ * whoever consumes it. If a number is what you need, {@link roundScore} is the
+ * drop-in; this one is for the pixel.
  */
 export function formatScore(value: number | null | undefined): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -60,6 +69,14 @@ export function formatScore(value: number | null | undefined): string | null {
  * places" (`describenet.js:204-208`). If you do that, use this — and be aware
  * you have made the value lossy on purpose. Everything else should carry the
  * full-precision number and call `formatScore` at the pixel.
+ *
+ * 🔴 **This returns a NUMBER; {@link formatScore} returns a STRING** — and a
+ * migrating consumer whose old helper was called `formatScore` but returned a
+ * number wants THIS one, not the name-alike. mesh measured the collision
+ * (2026-08-31, spec in `meshrelayserv/describenet.js@04f2ecf`): importing the
+ * homonym type-checks wherever the value only ever meets `JSON.stringify` or a
+ * template literal, and the symptom is numbers arriving as strings downstream,
+ * with nothing red anywhere near the cause.
  */
 export function roundScore(value: number | null | undefined): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;

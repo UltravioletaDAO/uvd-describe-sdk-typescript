@@ -214,16 +214,35 @@ export type DescribeErrorKind =
  *      the connection died before the request bytes were written or while the
  *      response was coming back.
  *
- * So: `'settled'` means *we hold the hash*. `'unknown'` means *ask the chain* —
- * never *"nothing happened"*. If you need the stronger answer, the receipt of a
- * later successful call and the on-chain transfer to the treasury are where it
- * lives; this SDK will not infer it for you.
+ * So: `'settled'` means *the seller stated settlement* — we hold the hash in
+ * `receipt`, or the seller declared it `pending` and `settlementPending` says
+ * so. `'unknown'` means *ask the chain* — never *"nothing happened"*. If you
+ * need the stronger answer, the receipt of a later successful call and the
+ * on-chain transfer to the treasury are where it lives; this SDK will not
+ * infer it for you.
+ *
+ * ⚠️ Until 2026-08-31 the `pending` sentinel rode in `receipt` itself, and
+ * Execution Market's INC-2026-08-26 is why it no longer does: a placeholder
+ * stored in the column meant for the hash gets archived as proof, and the only
+ * way to read the state back is comparing strings against a sentinel. The
+ * field that carries the hash never carries the placeholder — read the state
+ * from `settlementPending`, never from `receipt === 'pending'`.
  */
 export interface PaymentAttempt {
-  /** `'settled'` only with a receipt in hand. See the header of this type. */
+  /** `'settled'` only with the seller's statement in hand — a hash, or `pending`. */
   settlement: 'settled' | 'unknown';
-  /** `X-Payment-Receipt` — the settlement tx hash, or `"pending"`. */
+  /**
+   * `X-Payment-Receipt` when it can be proof: the settlement tx hash, or —
+   * only on this failure path — the served string kept verbatim as forensic
+   * evidence when it is garbage. NEVER the `pending` sentinel: that state
+   * lives in `settlementPending` (EM, INC-2026-08-26).
+   */
   receipt: string | null;
+  /**
+   * `true` only when the seller answered the literal `pending` — charged,
+   * settlement not yet reported. The flag is the state; `receipt` is the hash.
+   */
+  settlementPending: boolean;
   /** `X-Payment-Reused: true` means an earlier receipt was replayed, no new charge. */
   reused: boolean | null;
   /** The status of the answer that failed, when an answer arrived at all. */
@@ -400,19 +419,41 @@ export class DescribeNotFound extends DescribeError {
 }
 
 export class DescribeHTTPError extends DescribeError {
-  constructor(status: number, message: string) {
+  /**
+   * What the body SAID, not just the number it said it with — Execution
+   * Market's contribution, ported 2026-08-31 from the Python twin
+   * (`errors.py::DescribeHTTPError.server_reason` — same field, same
+   * `' — the server says: '` text): this class's recovery has promised since
+   * day one that *"the body names the field"*, and until today the exception
+   * threw that body away and carried the bare status. Whoever caught a 422
+   * had to re-request to learn which field was wrong.
+   *
+   * It arrives ALREADY redacted and truncated by `client.ts::serverReason` —
+   * the body is server-written text and a 5xx can echo an upstream URL with
+   * an API key in its path — and it is appended to the MESSAGE, never to
+   * `recovery`, which stays the frozen literal `recovery.test.ts` pins. The
+   * parameter is third and optional so every existing call keeps meaning what
+   * it meant — additive, like the twin's keyword-only argument.
+   */
+  readonly serverReason?: string;
+  constructor(status: number, message: string, opts: { serverReason?: string } = {}) {
     const server = status >= 500;
-    super(server ? 'http_5xx' : 'http_4xx', message, {
-      // 429 is the one 4xx worth retrying: the 20 rps ceiling is shared with
-      // every other UVD consumer, so it says "someone else is loud right now",
-      // not "your request is wrong".
-      transient: server || status === 429,
-      // A 4xx is the caller's fault and must NOT vanish into failOpen — except
-      // 429, which is the shared limit and reads exactly like a brief outage.
-      serviceFault: server || status === 429,
-      status,
-    });
+    super(
+      server ? 'http_5xx' : 'http_4xx',
+      opts.serverReason ? `${message} — the server says: ${opts.serverReason}` : message,
+      {
+        // 429 is the one 4xx worth retrying: the 20 rps ceiling is shared with
+        // every other UVD consumer, so it says "someone else is loud right now",
+        // not "your request is wrong".
+        transient: server || status === 429,
+        // A 4xx is the caller's fault and must NOT vanish into failOpen — except
+        // 429, which is the shared limit and reads exactly like a brief outage.
+        serviceFault: server || status === 429,
+        status,
+      },
+    );
     this.name = 'DescribeHTTPError';
+    this.serverReason = opts.serverReason;
   }
 }
 

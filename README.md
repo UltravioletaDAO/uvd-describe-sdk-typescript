@@ -149,6 +149,51 @@ pixel.
 
 ---
 
+## Trampas de migración (medidas por los equipos)
+
+Four ways a working pre-SDK integration breaks while every test stays green.
+None is hypothetical: each was measured by a team migrating real code — mesh's
+spec review of `meshrelayserv/describenet.js@04f2ecf` found the first three,
+and each one now has a guard in this package.
+
+### 1. `formatScore` returns a **string**; `roundScore` returns a **number**
+
+mesh's pre-SDK helper was *called* `formatScore` and returned a number.
+Importing this package's homonym compiles clean, every call site keeps working —
+and every score flowing into a JSON payload silently turns from `83` into
+`"83"`, one serialization away from whoever consumes it. If your old helper fed
+numbers onward, the drop-in is `roundScore`; `formatScore` is for the pixel.
+
+### 2. `product`, not `userAgent`
+
+The config key that names your product is `product`. mesh passed `userAgent`,
+the unknown key was ignored in silence, and their attribution vanished from the
+CDN with no symptom on their side — every call kept succeeding, so nobody
+looked. Since then an unknown config key **throws a `TypeError`** listing the
+valid keys, and `userAgent` specifically points you at `product`. The Python
+twin already dies the same way on an unknown key (keyword-only, no `**kwargs`)
+— but the parity is in the **throw**, not in the keys accepted: that twin
+takes both `product` and `user_agent`, this package only `product`.
+
+### 3. Do not re-parse — `client.wallet()` already parses, and `.raw` holds the wire payload
+
+A parsed result fed back into a parser used to "succeed" into an object of
+nulls: every snake_case lookup missed on the camelCase object, in silence,
+manufacturing the unrated-vs-failure confusion out of good data. Both wallet
+parsers now throw `DescribeUnparseable` on already-parsed input. Stored a
+result and need to re-read it? Parse `result.raw` — the payload as served is
+kept there for exactly this.
+
+### 4. The wrong parser now FAILS LOUD
+
+The free route's body (`GET /wallets/{w}/chains`) fed to
+`parseWalletBreakdown()` used to answer `finalScore: null`, `weightedScore:
+null`, `perChain: {}` — an object full of nothing about a wallet the free route
+just scored. It now throws, naming the route it recognised and the parser that
+owns it (`parseWalletReputation`).
+
+---
+
 ## Failures
 
 ```ts
@@ -267,7 +312,9 @@ try {
 } catch (err) {
   if (failedAfterPaying(err)) {
     // A signed envelope had already left. err.payment tells you how bad:
-    //   settlement: 'settled'  -> proof: err.payment.receipt is the tx hash
+    //   settlement: 'settled'  -> the seller stated it: err.payment.receipt is
+    //                             the tx hash — or settlementPending is true
+    //                             and the hash has not been reported yet
     //   settlement: 'unknown'  -> the SDK cannot tell. Reconcile, do not assume
     reconcile(err.payment.receipt, err.payment.amount, err.payment.token);
   } else {
@@ -282,6 +329,13 @@ unhandled 500 is rendered above the paywall middleware and carries no receipt
 even though the money moved, and `fetch` rejects identically whether the request
 bytes were written or not. `'unknown'` means *ask the chain*, not *nothing
 happened*.
+
+And `receipt` never carries the literal `pending`. The header legitimately does
+— the seller charged and settlement has not reported the hash yet — but since
+2026-08-31 that state travels in `settlementPending: true` with `receipt: null`.
+The reason is Execution Market's INC-2026-08-26: a placeholder stored in the
+column meant for the hash gets archived as proof. The field carries the hash,
+the flag carries the state, and nobody string-compares against a sentinel.
 
 ---
 
@@ -301,7 +355,7 @@ const describe = new DescribeClient({
 });
 
 const detail = await describe.walletBreakdown(wallet);   // never null — it throws
-detail.payment;   // { receipt: 'rcpt_…', reused: false }
+detail.payment;   // { receipt: '0x…', settlementPending: false, reused: false, malformedHashes: [] }
 ```
 
 🔴 **The key comes from the environment.** Never a literal, not even "just for a

@@ -144,7 +144,7 @@ import {
   type PaymentAttempt,
   type X402Challenge,
 } from './errors';
-import { looksLikeSettlementReceipt, malformedHashReport } from './hashes';
+import { looksLikeSettlementReceipt, malformedHashReport, SETTLEMENT_PENDING } from './hashes';
 import { jitterDelayMs, sleep } from './jitter';
 import {
   parseAgentReputation,
@@ -374,6 +374,81 @@ export interface DescribeClientConfig {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * Anything shaped like a URL inside a server-written error body. The scheme
+ * prefix (`[a-z][a-z0-9+.-]*://`) is RFC 3986's, not a guess: it catches
+ * `https://`, `postgresql://`, `wss://` — every place a credential travels in
+ * a path or in userinfo. Used by `serverReason`; see its docstring for why the
+ * redaction runs BEFORE the truncation.
+ */
+const URL_IN_BODY = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+/**
+ * What the server SAID, not just the number it said it with.
+ *
+ * Ported 2026-08-31 from the Python twin (`client.py::_server_reason`;
+ * Execution Market's contribution, verified additive there the same day): the
+ * `recovery` of `DescribeHTTPError` has promised since day one that "the body
+ * names the field" — and then the exception threw that body away and carried
+ * the bare status. Whoever caught a 422 had to re-request to learn which field
+ * was wrong. This reads `error` / `code` / `message` from the JSON body —
+ * tolerant: a non-JSON or non-object body is `undefined`, never a second
+ * exception on top of the one being raised.
+ *
+ * 🔴 Two guards, in this order, and the order is the point:
+ *
+ * - **URLs are redacted first** (`URL_IN_BODY` → `[url-redacted]`). The body
+ *   is written by the SERVER: a 5xx can echo an upstream URL that carries an
+ *   API key in its path — the exact shape the service scrubs on its own side
+ *   (`describe-net/describenet/chain/rpc.py::_redact`, because the key lives
+ *   in the path). We do not get to assume they always did.
+ * - **Truncation to ~300 chars runs AFTER the redaction.** The other order
+ *   could cut the string in the middle of a URL and leave the key standing.
+ *
+ * Nothing here is ever interpolated into `recovery`: that stays the frozen
+ * literal `recovery.test.ts` pins against the table.
+ */
+async function serverReason(response: Response): Promise<string | undefined> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const key of ['error', 'code', 'message'] as const) {
+    const value = record[key];
+    if (value !== null && value !== undefined) parts.push(`${key}=${String(value)}`);
+  }
+  if (parts.length === 0) return undefined;
+  let reason = parts.join(' · ').replace(URL_IN_BODY, '[url-redacted]');
+  if (reason.length > 300) reason = `${reason.slice(0, 300)}…`;
+  return reason;
+}
+
+/**
+ * Every key `DescribeClientConfig` accepts, as a value the COMPILER keeps in
+ * sync: a key added to the interface without a row here is a type error, and a
+ * row without a key is an excess-property error. The constructor checks incoming
+ * config against this, so "the compiler knows the keys" and "the runtime knows
+ * the keys" cannot drift apart — see the rewritten defence at the check itself.
+ */
+const KNOWN_CONFIG_KEYS: Record<keyof DescribeClientConfig, true> = {
+  baseUrl: true,
+  timeoutMs: true,
+  product: true,
+  failOpen: true,
+  onFailure: true,
+  jitterMs: true,
+  payer: true,
+  partner: true,
+  partnerFallsBackToPaying: true,
+  expectedPayTo: true,
+  fetchImpl: true,
+};
+
 /** Read reputation from describe.net. */
 export class DescribeClient {
   private readonly baseUrl: string;
@@ -389,15 +464,46 @@ export class DescribeClient {
   private readonly fetchImpl: typeof fetch;
 
   constructor(config: DescribeClientConfig = {}) {
+    // ⚠️ REWRITTEN 2026-08-31, and the old defence is left quoted because it
+    // was reasonable, measured wrong, and somebody will want it back. It read:
+    // *"a library that dies in its constructor over one [option] is worse than
+    // one that ignores it"* — and it sat here defending exactly the silence
+    // that bit mesh (meshrelay; spec in `meshrelayserv/describenet.js@04f2ecf`):
+    // they passed `userAgent` where this client takes `product`, the key was
+    // ignored without a sound, and their attribution vanished from the CDN
+    // logs with NO symptom on their side — every call kept succeeding, which
+    // is why nobody looked. A constructor throw costs one red test at dev
+    // time; the silent ignore cost an ecosystem its only attribution on a
+    // shared rate limit. The Python twin already dies here (keyword-only
+    // arguments, no `**kwargs`) — and the parity is in the THROW, not in the
+    // keys accepted: that twin takes both `product` and `user_agent`, this
+    // client only `product`. What is mirrored is that a mistyped key never
+    // passes in silence, so this is parity, not invention.
+    //
+    // What SURVIVES of the old rule is the VALUE half: garbage in a KNOWN key
+    // still falls back to its default instead of throwing (see `jitterMs`
+    // below) — a key you spelled right proves which protection you meant.
+    for (const key of Object.keys(config)) {
+      if (!(key in KNOWN_CONFIG_KEYS)) {
+        const hint =
+          key === 'userAgent'
+            ? " The User-Agent is built for you; name your product with `product` — it becomes the '(+name)' suffix."
+            : '';
+        throw new TypeError(
+          `Unknown DescribeClient option '${key}'.${hint} ` +
+            `Valid options: ${Object.keys(KNOWN_CONFIG_KEYS).join(', ')}.`,
+        );
+      }
+    }
     this.baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.ua = userAgent(config.product);
     this.failOpen = config.failOpen ?? true;
     this.onFailure = config.onFailure;
-    // Garbage falls back to the DEFAULT, never to off, and never throws here: a
-    // mistyped option must not silently drop a protection the rest of the
-    // ecosystem relies on, and a library that dies in its constructor over one
-    // is worse than one that ignores it. Only a real 0 disables the jitter.
+    // A garbage VALUE falls back to the DEFAULT, never to off, and never throws
+    // here: a mistyped value must not silently drop a protection the rest of
+    // the ecosystem relies on. Only a real 0 disables the jitter. (A mistyped
+    // KEY is different and throws above — mesh's case.)
     this.jitterMs =
       typeof config.jitterMs === 'number' && Number.isFinite(config.jitterMs) && config.jitterMs >= 0
         ? config.jitterMs
@@ -731,7 +837,9 @@ export class DescribeClient {
       throw new DescribeNotFound(`GET ${path} -> HTTP 404`);
     }
     if (!response.ok) {
-      throw new DescribeHTTPError(response.status, `GET ${path} -> HTTP ${response.status}`);
+      throw new DescribeHTTPError(response.status, `GET ${path} -> HTTP ${response.status}`, {
+        serverReason: await serverReason(response),
+      });
     }
     return this.readJson(response, path);
   }
@@ -770,7 +878,9 @@ export class DescribeClient {
     }
 
     if (first.status !== 402) {
-      throw new DescribeHTTPError(first.status, `GET ${path} -> HTTP ${first.status}`);
+      throw new DescribeHTTPError(first.status, `GET ${path} -> HTTP ${first.status}`, {
+        serverReason: await serverReason(first),
+      });
     }
 
     const challenge = await this.readChallenge(first, path);
@@ -817,11 +927,18 @@ export class DescribeClient {
       // No answer at all — timeout or dead socket. `fetch` rejects identically
       // whether the request bytes were written or not, so this is exactly the
       // case that CANNOT be narrowed: `unknown`, said out loud.
-      throw attachPayment(error, { settlement: 'unknown', receipt: null, reused: null, ...terms });
+      throw attachPayment(error, {
+        settlement: 'unknown',
+        receipt: null,
+        settlementPending: false,
+        reused: null,
+        ...terms,
+      });
     }
 
     const receipt = second.headers.get('X-Payment-Receipt');
     const reused = second.headers.get('X-Payment-Reused');
+    const receiptPending = receipt === SETTLEMENT_PENDING;
     const attempt: PaymentAttempt = {
       // A receipt is the settlement transaction hash, put there by the seller:
       // proof, not inference. Its absence proves nothing — an unhandled 500 is
@@ -829,12 +946,19 @@ export class DescribeClient {
       //
       // ⚠️ Since 2026-08-30 the header must also LOOK like a settlement id (a
       // hash, or the `pending` the OpenAPI declares) before it may be called
-      // proof. `'settled'` means *we hold the hash*, and a string that is not
-      // one is not one. The value is still carried in `receipt` — on this path
-      // it is forensic evidence, not a typed field — and `'unknown'` is the
-      // honest verdict: ask the chain.
+      // proof. `'settled'` means *the seller stated settlement*: we hold the
+      // hash, or the seller answered the literal `pending` and
+      // `settlementPending` says so. A string that is neither is neither, and
+      // `'unknown'` is the honest verdict: ask the chain.
+      //
+      // ⚠️ Since 2026-08-31 the `pending` sentinel never rides in `receipt` —
+      // Execution Market's INC-2026-08-26: a placeholder stored in the column
+      // meant for the hash gets archived as proof. Here `receipt` is null and
+      // the flag carries the state. Garbage, by contrast, IS kept verbatim on
+      // this failure path: there it is forensic evidence, not a typed field.
       settlement: receipt !== null && looksLikeSettlementReceipt(receipt) ? 'settled' : 'unknown',
-      receipt,
+      receipt: receiptPending ? null : receipt,
+      settlementPending: receiptPending,
       reused: reused === null ? null : reused.toLowerCase() === 'true',
       status: second.status,
       ...terms,
@@ -851,6 +975,9 @@ export class DescribeClient {
           `GET ${path} -> HTTP ${second.status} AFTER paying (settlement: ${attempt.settlement}` +
             `${receipt ? `, receipt ${receipt}` : ''}). Read \`error.payment\` before retrying: ` +
             'the same receipt unlocks only this byte-identical resource.',
+          // The most expensive door gets the reason too: a 4xx/5xx AFTER money
+          // moved is exactly where "what did they SAY" matters most.
+          { serverReason: await serverReason(second) },
         ),
         attempt,
       );
@@ -877,12 +1004,23 @@ export class DescribeClient {
     // (`attempt`, above) the served string is kept verbatim, because there it is
     // forensic evidence rather than a typed field — what changes there is that
     // `settlement` may not claim `'settled'` on the strength of a string that is
-    // not a hash. `'settled'` means *we hold the hash*, and we do not.
+    // not a hash. `'settled'` means *we hold the hash — or the seller declared
+    // it `pending`*, and we hold neither.
+    //
+    // ⚠️ Legitimate is not the same as a hash, and since 2026-08-31 the two no
+    // longer share a field: a `pending` header is NOT garbage (no mark, no
+    // alarm) and it is NOT a receipt either, so `receipt` goes `null` and
+    // `settlementPending` carries the state. Execution Market's INC-2026-08-26
+    // is the measurement: a placeholder that rides in the column meant for the
+    // hash ends up archived as proof, and every consumer that wants the state
+    // has to string-compare against a sentinel. The flag is the state; the
+    // field is the hash; neither ever stands in for the other.
     const receiptOk = receipt !== null && looksLikeSettlementReceipt(receipt);
     return {
       body,
       payment: {
-        receipt: receiptOk ? receipt : null,
+        receipt: receiptOk && !receiptPending ? receipt : null,
+        settlementPending: receiptPending,
         reused: (reused ?? '').toLowerCase() === 'true',
         malformedHashes: receipt !== null && !receiptOk ? ['receipt'] : [],
       },

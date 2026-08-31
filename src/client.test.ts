@@ -429,7 +429,12 @@ describe('metered routes', () => {
     expect(server.calls[1].headers['X-PAYMENT']).toBe('BASE64-X-PAYMENT');
     // The two headers the paywall has been emitting since 2026-08-25 and that
     // no client read until now.
-    expect(result.payment).toEqual({ receipt: SETTLEMENT_TX, reused: false, malformedHashes: [] });
+    expect(result.payment).toEqual({
+      receipt: SETTLEMENT_TX,
+      settlementPending: false,
+      reused: false,
+      malformedHashes: [],
+    });
     expect(result.finalScore).toBe(83.0);
     expect(result.caveats[0].code).toBe('top-client-share');
     expect(result.caveatScope).toBe('full');
@@ -643,6 +648,7 @@ describe('post-settlement evidence', () => {
     expect(err.payment).toMatchObject({
       settlement: 'settled',
       receipt: SETTLEMENT_TX,
+      settlementPending: false, // a real hash: nothing is pending about it
       reused: false,
       status: 500,
       amount: '0.01',
@@ -651,6 +657,35 @@ describe('post-settlement evidence', () => {
     // The message says it too, because the first thing anyone reads is the
     // message and not the properties.
     expect(err.message).toContain('settlement: settled');
+  });
+
+  it("a `pending` receipt on the failing response is 'settled' too — flag set, hash field EMPTY", async () => {
+    // The seller's OpenAPI declares `pending` legitimate: charged, settlement
+    // not yet reported. The design keeps calling that 'settled' — what changed
+    // on 2026-08-31 (EM's INC-2026-08-26) is WHERE the state travels: never in
+    // the field meant for the hash, where a placeholder gets archived as
+    // proof, but in `settlementPending`, so no consumer string-compares.
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: {
+        status: 500,
+        body: {},
+        headers: { 'X-Payment-Receipt': 'pending', 'X-Payment-Reused': 'false' },
+      },
+    });
+    const client = testClient({
+      fetchImpl: server.fetch,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(failedAfterPaying(err)).toBe(true);
+    expect(err.payment).toMatchObject({
+      settlement: 'settled', // the seller stated it — that half is unchanged
+      receipt: null, // the placeholder never rides in the hash field
+      settlementPending: true,
+    });
   });
 
   it('no receipt is `unknown`, never "nothing happened"', async () => {
@@ -668,7 +703,12 @@ describe('post-settlement evidence', () => {
 
     const err = await client.walletBreakdown(KNOWN).catch((e) => e);
 
-    expect(err.payment).toMatchObject({ settlement: 'unknown', receipt: null, reused: null });
+    expect(err.payment).toMatchObject({
+      settlement: 'unknown',
+      receipt: null,
+      settlementPending: false, // no header at all: nothing was STATED pending
+      reused: null,
+    });
   });
 
   it('a timeout with the envelope in flight is the case that CANNOT be narrowed', async () => {
@@ -690,6 +730,7 @@ describe('post-settlement evidence', () => {
     expect(err.payment).toEqual({
       settlement: 'unknown',
       receipt: null,
+      settlementPending: false,
       reused: null,
       amount: '0.01',
       token: 'USDC',
@@ -713,7 +754,12 @@ describe('post-settlement evidence', () => {
     const err = await client.walletBreakdown(KNOWN).catch((e) => e);
 
     expect(err.kind).toBe('unparseable');
-    expect(err.payment).toMatchObject({ settlement: 'settled', receipt: SETTLEMENT_TX, status: 200 });
+    expect(err.payment).toMatchObject({
+      settlement: 'settled',
+      receipt: SETTLEMENT_TX,
+      settlementPending: false,
+      status: 200,
+    });
   });
 
   it('MOUNTS THE BAD STATE: a failure BEFORE the envelope leaves carries no payment at all', async () => {
@@ -778,6 +824,44 @@ describe('constructor', () => {
     // Failing here names the problem ("no fetch"); failing at the first call
     // surfaces as `unreachable`, which reads as "describe.net is down".
     expect(() => new DescribeClient({ fetchImpl: 'not a function' as never })).toThrow(TypeError);
+  });
+
+  it("an unknown config key throws, listing the valid ones — mesh's silent `userAgent`", () => {
+    // ⚠️ This is the REVERSAL of a decision this constructor used to defend in
+    // a comment ("a library that dies in its constructor over one [option] is
+    // worse than one that ignores it"). mesh disproved it in production
+    // (spec in meshrelayserv/describenet.js@04f2ecf): they passed `userAgent`
+    // where this client takes `product`, the key was ignored in silence, and
+    // their attribution vanished from the CDN with no symptom — every call
+    // kept succeeding, so nobody looked. The Python twin already throws
+    // TypeError here (keyword-only, no **kwargs); this is parity.
+    const err = (() => {
+      try {
+        new DescribeClient({ userAgent: 'meshrelay' } as never);
+        return null;
+      } catch (e) {
+        return e as Error;
+      }
+    })();
+
+    expect(err).toBeInstanceOf(TypeError);
+    // The exact key that bit mesh gets the exact fix spelled out...
+    expect(err!.message).toContain("'userAgent'");
+    expect(err!.message).toContain('product');
+    // ...and every message lists the valid keys, so the fix never needs docs.
+    expect(err!.message).toContain('baseUrl');
+    expect(err!.message).toContain('jitterMs');
+  });
+
+  it('MOUNTS THE BAD STATE: a typoed key must not build a client that quietly drops the option', () => {
+    // Any unknown key, not just the famous one: `jitterms` (lowercase m) would
+    // otherwise build a client with the default jitter and no way to notice.
+    expect(() => new DescribeClient({ jitterms: 0 } as never)).toThrow(TypeError);
+    // A garbage VALUE for a KNOWN key is the other half of the rule and still
+    // does NOT throw — the key you spelled right proves which protection you
+    // meant, and the value falls back to its default (asserted in the jitter
+    // suite below).
+    expect(() => testClient({ jitterMs: -1 })).not.toThrow();
   });
 
   it('trims a trailing slash off baseUrl so paths never double up', async () => {
@@ -979,7 +1063,12 @@ describe('a malformed hash is dropped, marked and announced — never thrown', (
     const bad = paidRun(agentBody([]), { 'X-Payment-Receipt': 'rcpt_abc123' });
     const agent = await bad.client.agent('base', 42);
 
-    expect(agent.payment).toEqual({ receipt: null, reused: false, malformedHashes: ['receipt'] });
+    expect(agent.payment).toEqual({
+      receipt: null,
+      settlementPending: false, // garbage is garbage — never promoted to a state
+      reused: false,
+      malformedHashes: ['receipt'],
+    });
     expect((bad.seen[0].error as DescribeMalformedHash).fields).toEqual(['payment.receipt']);
     // `raw` is the BODY, so this is the one malformed value it cannot preserve.
     // It survives in the message or it is lost.
@@ -990,7 +1079,19 @@ describe('a malformed hash is dropped, marked and announced — never thrown', (
 
     // The happy path of a freshly settled payment. Alarming here would be the
     // alarm that screams about good data.
-    expect(ok.payment).toEqual({ receipt: 'pending', reused: false, malformedHashes: [] });
+    //
+    // ⚠️ Corrected 2026-08-31, and the old assertion is worth quoting because
+    // it asserted the bug: `receipt: 'pending'`. That is EM's INC-2026-08-26
+    // in miniature — the placeholder riding in the field meant for the hash,
+    // ready to be archived as proof by anyone who stores `payment.receipt`.
+    // Legitimate did not change (no mark, no alarm); WHERE the state travels
+    // did: the flag says pending, the hash field stays empty.
+    expect(ok.payment).toEqual({
+      receipt: null,
+      settlementPending: true,
+      reused: false,
+      malformedHashes: [],
+    });
     expect(pending.seen).toEqual([]);
   });
 
@@ -1013,6 +1114,7 @@ describe('a malformed hash is dropped, marked and announced — never thrown', (
     expect(failedAfterPaying(err)).toBe(true);
     expect(err.payment.settlement).toBe('unknown');
     expect(err.payment.receipt).toBe('rcpt_abc123'); // kept, for the reconciliation
+    expect(err.payment.settlementPending).toBe(false); // garbage is not `pending`
   });
 
   it('an observer that throws does not destroy a response that was paid for', async () => {

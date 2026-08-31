@@ -1,6 +1,6 @@
 {
   "name": "uvd-describe-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read reputation from describe.net — the ERC-8004 index across 11 chains. Free lookups need no dependency; metered lookups pay their 402 through uvd-x402-sdk, or read free over the ERC-8128 partner rail. null is never 0.",
   "author": "Ultravioleta DAO <ultravioletadao@gmail.com>",
   "license": "MIT",

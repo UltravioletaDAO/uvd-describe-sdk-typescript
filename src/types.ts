@@ -62,16 +62,32 @@ export type Timestamp = string | null;
  */
 export interface PaymentEvidence {
   /**
-   * The settlement id, or `null` when none was served **or when what was served
-   * was not one** — `malformedHashes` tells the two apart.
+   * The settlement transaction hash, or `null` — when none was served, when
+   * what was served was not one (`malformedHashes` tells those two apart), or
+   * when the seller answered the literal `pending` (`settlementPending` tells
+   * THAT one apart).
    *
    * Validated with its own rule (`hashes.looksLikeSettlementReceipt`) because
-   * this is the one field where `"pending"` is a legitimate value: the live
-   * OpenAPI declares the header as the settlement transaction hash *"or
-   * `pending` if settlement has not reported one"*. Treating that as garbage
-   * would fire an alarm on the happy path of every fresh payment.
+   * this is the one field where `"pending"` is a legitimate value on the wire:
+   * the live OpenAPI declares the header as the settlement transaction hash
+   * *"or `pending` if settlement has not reported one"*. Treating it as
+   * garbage would fire an alarm on the happy path of every fresh payment.
+   *
+   * ⚠️ Legitimate on the WIRE, never in this field — corrected 2026-08-31,
+   * from Execution Market's INC-2026-08-26: until then `pending` passed
+   * through here, i.e. a placeholder riding in the field meant for the hash,
+   * which is exactly what gets archived as proof by anyone who stores this
+   * value. Now the sentinel is translated to `null` + `settlementPending:
+   * true` at the door, and no consumer ever has to string-compare against it.
    */
   receipt: string | null;
+  /**
+   * `true` only when `X-Payment-Receipt` was the literal `pending`: the seller
+   * charged and settlement has not reported the hash yet. Not garbage (no
+   * mark in `malformedHashes`, no alarm) and not a receipt either. Read the
+   * state HERE — `receipt === 'pending'` can no longer be true, on purpose.
+   */
+  settlementPending: boolean;
   reused: boolean;
   /**
    * `['receipt']` when the header carried something that is neither a hash nor
