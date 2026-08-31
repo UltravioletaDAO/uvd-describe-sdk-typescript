@@ -11,10 +11,20 @@
  * 3. **A body that is not the shape we asked for is `unparseable`, not
  *    garbage-in-silence.** The failure that has to be impossible here is a
  *    response that parses "successfully" into an object full of zeros.
+ * 4. **A hash field that is not a hash is dropped and MARKED, never passed
+ *    through.** Added 2026-08-30 from KarmaKadabra's *"el 200 sin tx"*. The
+ *    typed field goes `null` — nobody builds an explorer link out of garbage —
+ *    and its wire name goes into the `malformedHashes` of the object that owns
+ *    it, so that **absent** (`null`, list empty) stays distinguishable from
+ *    **malformed** (`null`, name in the list). It is rule 1 one level down: the
+ *    absence of a value and a value that is nonsense are different facts, and
+ *    collapsing them is the failure this file exists to prevent. See
+ *    `hashes.ts`, and `client.ts` for how the fact reaches the caller.
  */
 
 import { CAVEAT_SCOPE_FREE, CAVEAT_SCOPE_METERED, type Caveat } from './caveats';
 import { DescribeUnparseable } from './errors';
+import { hashField } from './hashes';
 import type {
   Activity,
   AgentReputation,
@@ -148,11 +158,17 @@ function parseActivity(v: unknown): Activity | null {
 
 function parseSnapshot(v: unknown): Snapshot | null {
   if (!isObj(v)) return null;
+  const malformed: string[] = [];
   return {
     id: num(v.id),
-    inputsDigest: String(v.inputs_digest ?? ''),
+    // A bare sha256 hexdigest, no `0x` (`aggregate.py:1920`). This one is worth
+    // validating precisely because it is the citable field: two snapshots with
+    // the same digest are supposed to say the same thing, and a comparison
+    // between two garbage strings can agree by accident.
+    inputsDigest: hashField(v, 'inputs_digest', malformed),
     policyVersion: String(v.policy_version ?? ''),
     computedAt: String(v.computed_at ?? ''),
+    malformedHashes: malformed,
   };
 }
 
@@ -170,28 +186,43 @@ function parseOwnership(v: unknown): Ownership | null {
   };
 }
 
+/**
+ * One rating, with its THREE hash fields shape-validated.
+ *
+ * KarmaKadabra's contribution (2026-08-30): a `tx_hash` that is not a hash is a
+ * 200 that did not do the thing, and *"si nosotros no chequeáramos el tx,
+ * habríamos contado 14 ratings que no existen"*. Anything that is not a hash
+ * becomes `null` and its wire name goes into the rating's `malformedHashes` —
+ * never an exception, because one bad accessory field must not destroy a
+ * decomposition the caller paid for. See `hashes.ts` for the four legitimate
+ * shapes and for why an EVM-only regex would have flagged all of Solana.
+ */
 function parseRatings(v: unknown): Rating[] {
   if (!Array.isArray(v)) return [];
-  return v.filter(isObj).map((r) => ({
-    client: String(r.client ?? ''),
-    feedbackIndex: num(r.feedback_index),
-    value: num(r.value),
-    valueDecimals: num(r.value_decimals),
-    normalizedValue: optNumber(r.normalized_value),
-    tag1: optString(r.tag1),
-    tag2: optString(r.tag2),
-    isRevoked: r.is_revoked === true,
-    isSelf: r.is_self === true,
-    txHash: optString(r.tx_hash),
-    blockNumber: optNumber(r.block_number),
-    logIndex: optNumber(r.log_index),
-    feedbackUri: optString(r.feedback_uri),
-    issuerHost: optString(r.issuer_host),
-    issuer: optString(r.issuer),
-    issuerOrg: optString(r.issuer_org),
-    feedbackHash: optString(r.feedback_hash),
-    revokedTx: optString(r.revoked_tx),
-  }));
+  return v.filter(isObj).map((r) => {
+    const malformed: string[] = [];
+    return {
+      client: String(r.client ?? ''),
+      feedbackIndex: num(r.feedback_index),
+      value: num(r.value),
+      valueDecimals: num(r.value_decimals),
+      normalizedValue: optNumber(r.normalized_value),
+      tag1: optString(r.tag1),
+      tag2: optString(r.tag2),
+      isRevoked: r.is_revoked === true,
+      isSelf: r.is_self === true,
+      txHash: hashField(r, 'tx_hash', malformed),
+      blockNumber: optNumber(r.block_number),
+      logIndex: optNumber(r.log_index),
+      feedbackUri: optString(r.feedback_uri),
+      issuerHost: optString(r.issuer_host),
+      issuer: optString(r.issuer),
+      issuerOrg: optString(r.issuer_org),
+      feedbackHash: hashField(r, 'feedback_hash', malformed),
+      revokedTx: hashField(r, 'revoked_tx', malformed),
+      malformedHashes: malformed,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -63,6 +63,12 @@ export {
   DescribeError,
   DescribeHTTPError,
   /**
+   * 🔴 Exported to be RECOGNISED, never to be caught: it is never thrown. It
+   * arrives as the `error` of an `onFailure` notice whose `kind` is
+   * `malformed_hash`, saying a hash field was dropped because it was not a hash.
+   */
+  DescribeMalformedHash,
+  /**
    * ⚠️ Exported since 2026-08-30 and it used to be deliberately absent: with the
    * metered methods no longer nullable, a 404 on `walletBreakdown()` / `agent()`
    * DOES reach the caller as a throw, so `instanceof` has to be possible. On the
@@ -98,8 +104,30 @@ export type { Caveat, CaveatCode, KnownCaveatCode } from './caveats';
 
 export { formatScore, roundScore } from './format';
 
+/**
+ * The distinct-rater helper, from MeshRelay. Read its docstring before using the
+ * number: summing the per-chain counts double-counts and taking the maximum
+ * underestimates, both measured, and this function does neither.
+ */
+export { resolveDistinctRaters } from './raters';
+
+/**
+ * The hash-shape contract, from KarmaKadabra's *"el 200 sin tx"*.
+ *
+ * Exported because the check belongs to the CONTRACT and not to each consumer —
+ * that was their whole point. `malformedHashReport` locates what a parsed result
+ * dropped; the two predicates are there for a payload you validate yourself.
+ */
+export {
+  looksLikeOnchainId,
+  looksLikeSettlementReceipt,
+  malformedHashReport,
+  SETTLEMENT_PENDING,
+} from './hashes';
+
 export {
   DEFAULT_BASE_URL,
+  DEFAULT_JITTER_MS,
   DEFAULT_SITE_URL,
   DEFAULT_TIMEOUT_MS,
   PARTNER_CHAIN_ID,

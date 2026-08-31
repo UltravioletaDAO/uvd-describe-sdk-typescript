@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   CHALLENGE_402,
@@ -11,20 +11,55 @@ import {
   WALLET_WITH_SCORE,
 } from './__fixtures__/live';
 import { mockServer, type Route } from './__fixtures__/server';
-import { DescribeClient, type DescribeFailure } from './client';
+import { DescribeClient, type DescribeClientConfig, type DescribeFailure } from './client';
 import { TREASURY_EVM } from './config';
 import {
   DescribeError,
+  DescribeMalformedHash,
   DescribeNotFound,
   DescribePaymentRefused,
   DescribePaymentRequired,
   failedAfterPaying,
+  failOpenCovers,
   type X402Challenge,
 } from './errors';
 import type { AgentReputation, WalletBreakdown } from './types';
 
 const KNOWN = '0x97cd97cfe21799bacbf39d0a53469e5f82f30996';
 const UNRATED = '0xdead00000000000000000000000000000000beef';
+
+/**
+ * A settlement receipt SHAPED like one — `0x` + 64 hex.
+ *
+ * ⚠️ Changed 2026-08-30, and the old values are worth naming: this file used to
+ * stamp `'rcpt_abc123'`, `'0xsettlementhash'` and `'0xabc'` into
+ * `X-Payment-Receipt`. None of the three can come off that header — it carries a
+ * settlement transaction hash or the literal `pending` — so three tests about
+ * proof of payment were asserting on values that prove nothing. They went red
+ * the moment the receipt got its shape check (KarmaKadabra, 2026-08-30), which
+ * is the check working: a fixture nobody could have served was hiding inside a
+ * green suite. The house rule that catches this earlier is already written in
+ * `__fixtures__/live.ts` — a fixture a developer invents tests the developer.
+ */
+const SETTLEMENT_TX = `0x${'ab'.repeat(32)}`;
+
+/**
+ * Every client in this file is built with the jitter OFF — and this is the same
+ * line a consumer should write in their own suite.
+ *
+ * The jitter ships ON (400 ms max, KarmaKadabra's measurement, see
+ * `config.ts::DEFAULT_JITTER_MS`), which is right against a rate limit shared
+ * with the rest of the ecosystem and pointless against a `fetchImpl` that
+ * answers instantly. Leaving it on would cost this suite ~200 ms per mocked
+ * call and turn a sub-second loop into tens of seconds — and a suite that sleeps
+ * for a behaviour it is not testing teaches people to stop running it.
+ *
+ * `jitterMs` comes FIRST so any test can override it, which is what the jitter's
+ * own tests below do: they go through this helper with a real value, so nothing
+ * about the sleep is mocked away.
+ */
+const testClient = (config: DescribeClientConfig = {}) =>
+  new DescribeClient({ jitterMs: 0, ...config });
 
 // ---------------------------------------------------------------------------
 // R1 — null is never 0, and the absence of data is not the absence of an answer
@@ -33,7 +68,7 @@ const UNRATED = '0xdead00000000000000000000000000000000beef';
 describe('R1 — null never 0', () => {
   it('an unrated wallet answers with an object whose globalScore is null', async () => {
     const server = mockServer({ [`/wallets/${UNRATED}/chains`]: { body: WALLET_UNRATED } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const rep = await client.wallet(UNRATED);
 
@@ -54,7 +89,7 @@ describe('R1 — null never 0', () => {
       [`/wallets/${UNRATED}/chains`]: { body: WALLET_UNRATED },
       '/wallets/0xrated0/chains': { body: { ...WALLET_UNRATED, global_score: 0 } },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const unrated = await client.wallet(UNRATED);
     const scoredZero = await client.wallet('0xrated0');
@@ -73,7 +108,7 @@ describe('R1 — null never 0', () => {
         },
       },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
     const rep = await client.wallet(KNOWN);
     expect(rep!.chains[0].finalScore).toBeNull();
   });
@@ -87,7 +122,7 @@ describe('R4 — no exception for absence', () => {
   it('a 404 does NOT throw — it is absence, not a failure', async () => {
     const server = mockServer({ '/wallets/0xnope/chains': { status: 404, body: { detail: 'nope' } } });
     const seen: DescribeFailure[] = [];
-    const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+    const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
     const rep = await client.wallet('0xnope');
 
@@ -105,7 +140,7 @@ describe('R4 — no exception for absence', () => {
     // second depend on the first would put "there is no such wallet" behind a
     // switch whose name says nothing about it.
     const server = mockServer({ '/wallets/0xnope/chains': { status: 404, body: {} } });
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: false });
 
     await expect(client.wallet('0xnope')).resolves.toBeNull();
   });
@@ -119,7 +154,7 @@ describe('R4 — no exception for absence', () => {
     // `payment`, because a 404 is read before the challenge is. Nothing was
     // signed, nothing was spent to learn there is no such agent.
     const server = mockServer({ '/reputation/agent/base/999999': { status: 404, body: {} } });
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: false });
 
     const err = await client.agent('base', 999999).catch((e) => e);
 
@@ -136,7 +171,7 @@ describe('R4 — no exception for absence', () => {
       '/wallets/0xnope/chains': { status: 404, body: {} },
       '/wallets/notawallet/chains': { status: 422, body: NOT_AN_ADDRESS_422 },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: false });
 
     await expect(client.wallet('0xnope')).resolves.toBeNull();
     await expect(client.wallet('notawallet')).rejects.toMatchObject({ kind: 'http_4xx' });
@@ -145,7 +180,7 @@ describe('R4 — no exception for absence', () => {
   it('an unrated wallet never throws, with failOpen either way', async () => {
     for (const failOpen of [true, false]) {
       const server = mockServer({ [`/wallets/${UNRATED}/chains`]: { body: WALLET_UNRATED } });
-      const client = new DescribeClient({ fetchImpl: server.fetch, failOpen });
+      const client = testClient({ fetchImpl: server.fetch, failOpen });
       await expect(client.wallet(UNRATED)).resolves.not.toBeNull();
     }
   });
@@ -155,7 +190,7 @@ describe('R4 — no exception for absence', () => {
       '/wallets/notawallet/chains': { status: 422, body: NOT_AN_ADDRESS_422 },
     });
     const onFailure = vi.fn();
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: true, onFailure });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: true, onFailure });
 
     // failOpen protects against THEIR outage, never against YOUR bug.
     // Swallowing this would say "this wallet has no reputation" forever about
@@ -171,7 +206,7 @@ describe('R4 — no exception for absence', () => {
 
   it('invalid JSON is a protocol failure and is typed as unparseable', async () => {
     const server = mockServer({ '/health': { notJson: '<html>502 Bad Gateway</html>' } });
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: false });
     await expect(client.health()).rejects.toMatchObject({ kind: 'unparseable', transient: false });
   });
 });
@@ -184,7 +219,7 @@ describe('R5 — failOpen is observable', () => {
   it('a 500 returns null AND announces the reason', async () => {
     const server = mockServer({ [`/wallets/${KNOWN}/chains`]: { status: 500, body: {} } });
     const seen: DescribeFailure[] = [];
-    const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+    const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
     const rep = await client.wallet(KNOWN);
 
@@ -200,7 +235,7 @@ describe('R5 — failOpen is observable', () => {
   it('a transport failure returns null and announces `unreachable`', async () => {
     const server = mockServer({ '/health': { throws: new TypeError('fetch failed') } });
     const seen: DescribeFailure[] = [];
-    const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+    const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
     expect(await client.health()).toBeNull();
     expect(seen[0].kind).toBe('unreachable');
@@ -210,7 +245,7 @@ describe('R5 — failOpen is observable', () => {
   it('a timeout is the client\'s own clock, and it announces `timeout`', async () => {
     const server = mockServer({ '/health': { hang: true } });
     const seen: DescribeFailure[] = [];
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       timeoutMs: 20,
       onFailure: (f) => seen.push(f),
@@ -236,7 +271,7 @@ describe('R5 — failOpen is observable', () => {
     for (const [kind, route] of covered) {
       const server = mockServer({ '/health': route });
       const seen: DescribeFailure[] = [];
-      const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+      const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
       const result = await client.health();
 
@@ -249,7 +284,7 @@ describe('R5 — failOpen is observable', () => {
   it('failOpen: false rethrows the same typed error instead of nulling', async () => {
     const server = mockServer({ '/health': { status: 503, body: {} } });
     const onFailure = vi.fn();
-    const client = new DescribeClient({ fetchImpl: server.fetch, failOpen: false, onFailure });
+    const client = testClient({ fetchImpl: server.fetch, failOpen: false, onFailure });
 
     await expect(client.health()).rejects.toMatchObject({ kind: 'http_5xx' });
     expect(onFailure).not.toHaveBeenCalled();
@@ -258,7 +293,7 @@ describe('R5 — failOpen is observable', () => {
   it('429 (the shared rate limit) is covered by failOpen and marked transient', async () => {
     const server = mockServer({ '/health': { status: 429, body: {} } });
     const seen: DescribeFailure[] = [];
-    const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+    const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
     expect(await client.health()).toBeNull();
     expect(seen[0]).toMatchObject({ kind: 'http_4xx', transient: true });
@@ -272,7 +307,7 @@ describe('R5 — failOpen is observable', () => {
 describe('free routes', () => {
   it('parses a wallet with reputation', async () => {
     const server = mockServer({ [`/wallets/${KNOWN}/chains`]: { body: WALLET_WITH_SCORE } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const rep = await client.wallet(KNOWN);
 
@@ -289,7 +324,7 @@ describe('free routes', () => {
     const server = mockServer({
       [`/wallets/${solana}/chains`]: { body: { ...WALLET_UNRATED, wallet: solana } },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     await client.wallet(solana);
 
@@ -299,7 +334,7 @@ describe('free routes', () => {
 
   it('leaderboard is a bare array and is sent with no parameters', async () => {
     const server = mockServer({ '/leaderboard': { body: LEADERBOARD } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const rows = await client.leaderboard();
 
@@ -314,13 +349,13 @@ describe('free routes', () => {
     const server = mockServer({
       '/leaderboard': { status: 422, body: LEADERBOARD_TAKES_NO_PARAMS_422 },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
     await expect(client.leaderboard()).rejects.toMatchObject({ kind: 'http_4xx', status: 422 });
   });
 
   it('health carries the live calibrable values so nobody re-types them', async () => {
     const server = mockServer({ '/health': { body: HEALTH } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const health = await client.health();
 
@@ -332,7 +367,7 @@ describe('free routes', () => {
 
   it('sends an attributable User-Agent', async () => {
     const server = mockServer({ '/health': { body: HEALTH } });
-    const client = new DescribeClient({ fetchImpl: server.fetch, product: 'meshrelay' });
+    const client = testClient({ fetchImpl: server.fetch, product: 'meshrelay' });
 
     await client.health();
 
@@ -341,7 +376,7 @@ describe('free routes', () => {
 
   it('badgeUrl and profileUrl open no socket', async () => {
     const server = mockServer({});
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     expect(client.badgeUrl(KNOWN)).toBe(`https://api.describe.net/badge/${KNOWN}.svg`);
     expect(client.profileUrl(KNOWN)).toBe(`https://describe.net/agent.html?wallet=${KNOWN}`);
@@ -358,7 +393,7 @@ describe('metered routes', () => {
 
   it('402 with no payer throws, and hands over the challenge unpaid', async () => {
     const server = mockServer({ [PATH]: { status: 402, body: CHALLENGE_402 } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const err = await client.walletBreakdown(KNOWN).catch((e) => e);
 
@@ -376,13 +411,13 @@ describe('metered routes', () => {
       [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
       [`${PATH}#2`]: {
         body: WALLET_BREAKDOWN,
-        headers: { 'X-Payment-Receipt': 'rcpt_abc123', 'X-Payment-Reused': 'false' },
+        headers: { 'X-Payment-Receipt': SETTLEMENT_TX, 'X-Payment-Reused': 'false' },
       },
     });
     // The declared parameter is what makes `pay.mock.calls[0][0]` type-check:
     // a bare `vi.fn(async () => …)` infers a zero-length argument tuple.
     const pay = vi.fn(async (_challenge: X402Challenge) => 'BASE64-X-PAYMENT');
-    const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay } });
+    const client = testClient({ fetchImpl: server.fetch, payer: { pay } });
 
     const result = await client.walletBreakdown(KNOWN);
 
@@ -394,7 +429,7 @@ describe('metered routes', () => {
     expect(server.calls[1].headers['X-PAYMENT']).toBe('BASE64-X-PAYMENT');
     // The two headers the paywall has been emitting since 2026-08-25 and that
     // no client read until now.
-    expect(result.payment).toEqual({ receipt: 'rcpt_abc123', reused: false });
+    expect(result.payment).toEqual({ receipt: SETTLEMENT_TX, reused: false, malformedHashes: [] });
     expect(result.finalScore).toBe(83.0);
     expect(result.caveats[0].code).toBe('top-client-share');
     expect(result.caveatScope).toBe('full');
@@ -407,7 +442,7 @@ describe('metered routes', () => {
       '/reputation/agent/base/1#1': { status: 402, body: CHALLENGE_402 },
       '/reputation/agent/base/1#2': { body: { network: 'base', agent_id: 1 } },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
+    const client = testClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
 
     // No `!`, no `?.`, no narrowing: if either signature goes back to
     // `| null` these two lines stop compiling. `npm run typecheck` excludes
@@ -426,7 +461,7 @@ describe('metered routes', () => {
       [`${PATH}#1`]: { status: 402, body: { free: 'preview' }, headers: { 'Payment-Required': encoded } },
       [`${PATH}#2`]: { body: WALLET_BREAKDOWN },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       payer: { pay: async (c) => `paid-${c.amount}` },
     });
@@ -446,7 +481,7 @@ describe('metered routes', () => {
     };
     const server = mockServer({ [PATH]: { status: 402, body: poisoned } });
     const pay = vi.fn(async () => 'SHOULD-NEVER-BE-CALLED');
-    const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay } });
+    const client = testClient({ fetchImpl: server.fetch, payer: { pay } });
 
     const err = await client.walletBreakdown(KNOWN).catch((e) => e);
 
@@ -463,7 +498,7 @@ describe('metered routes', () => {
       [PATH]: { status: 402, body: { ...CHALLENGE_402, recipient: '0xdeadbeef', recipients: {}, accepts: [] } },
     });
     const onFailure = vi.fn();
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       failOpen: true,
       onFailure,
@@ -480,13 +515,13 @@ describe('metered routes', () => {
       [`${PATH}#1`]: { status: 402, body: { ...CHALLENGE_402, recipient: TREASURY_EVM.toLowerCase() } },
       [`${PATH}#2`]: { body: WALLET_BREAKDOWN },
     });
-    const client = new DescribeClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
+    const client = testClient({ fetchImpl: server.fetch, payer: { pay: async () => 'ok' } });
     await expect(client.walletBreakdown(KNOWN)).resolves.toMatchObject({ finalScore: 83.0 });
   });
 
   it('a metered route that answers 200 straight away reports no payment', async () => {
     const server = mockServer({ [PATH]: { body: WALLET_BREAKDOWN } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     const result = await client.walletBreakdown(KNOWN);
 
@@ -523,7 +558,7 @@ describe('R5 — the paid routes never fail open', () => {
         [`${PATH}#2`]: route,
       });
       const onFailure = vi.fn();
-      const client = new DescribeClient({
+      const client = testClient({
         fetchImpl: server.fetch,
         failOpen: true, // ← explicitly ON, and it still must not swallow this
         onFailure,
@@ -552,7 +587,7 @@ describe('R5 — the paid routes never fail open', () => {
     for (const [kind, route] of AFTER_PAYING) {
       const server = mockServer({ '/health': route, '/leaderboard': route });
       const seen: DescribeFailure[] = [];
-      const client = new DescribeClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
+      const client = testClient({ fetchImpl: server.fetch, onFailure: (f) => seen.push(f) });
 
       expect(await client.health(), `free health/${kind} should degrade`).toBeNull();
       expect(await client.leaderboard(), `free leaderboard/${kind} should degrade`).toBeNull();
@@ -566,7 +601,7 @@ describe('R5 — the paid routes never fail open', () => {
       [`${path}#1`]: { status: 402, body: CHALLENGE_402 },
       [`${path}#2`]: { status: 503, body: {} },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       failOpen: true,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
@@ -594,10 +629,10 @@ describe('post-settlement evidence', () => {
       [`${PATH}#2`]: {
         status: 500,
         body: {},
-        headers: { 'X-Payment-Receipt': '0xsettlementhash', 'X-Payment-Reused': 'false' },
+        headers: { 'X-Payment-Receipt': SETTLEMENT_TX, 'X-Payment-Reused': 'false' },
       },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
     });
@@ -607,7 +642,7 @@ describe('post-settlement evidence', () => {
     expect(failedAfterPaying(err)).toBe(true);
     expect(err.payment).toMatchObject({
       settlement: 'settled',
-      receipt: '0xsettlementhash',
+      receipt: SETTLEMENT_TX,
       reused: false,
       status: 500,
       amount: '0.01',
@@ -626,7 +661,7 @@ describe('post-settlement evidence', () => {
       [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
       [`${PATH}#2`]: { status: 500, body: {} },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
     });
@@ -641,7 +676,7 @@ describe('post-settlement evidence', () => {
       [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
       [`${PATH}#2`]: { hang: true },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       timeoutMs: 20,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
@@ -667,9 +702,9 @@ describe('post-settlement evidence', () => {
     // garbage. The old code returned `null` here.
     const server = mockServer({
       [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
-      [`${PATH}#2`]: { notJson: '<html>gateway</html>', headers: { 'X-Payment-Receipt': '0xabc' } },
+      [`${PATH}#2`]: { notJson: '<html>gateway</html>', headers: { 'X-Payment-Receipt': SETTLEMENT_TX } },
     });
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       failOpen: true,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
@@ -678,7 +713,7 @@ describe('post-settlement evidence', () => {
     const err = await client.walletBreakdown(KNOWN).catch((e) => e);
 
     expect(err.kind).toBe('unparseable');
-    expect(err.payment).toMatchObject({ settlement: 'settled', receipt: '0xabc', status: 200 });
+    expect(err.payment).toMatchObject({ settlement: 'settled', receipt: SETTLEMENT_TX, status: 200 });
   });
 
   it('MOUNTS THE BAD STATE: a failure BEFORE the envelope leaves carries no payment at all', async () => {
@@ -691,7 +726,7 @@ describe('post-settlement evidence', () => {
     const noPayer = mockServer({ [PATH]: { status: 402, body: CHALLENGE_402 } });
     before.push([
       'payment_required',
-      () => new DescribeClient({ fetchImpl: noPayer.fetch }).walletBreakdown(KNOWN),
+      () => testClient({ fetchImpl: noPayer.fetch }).walletBreakdown(KNOWN),
     ]);
 
     const stranger = mockServer({
@@ -700,7 +735,7 @@ describe('post-settlement evidence', () => {
     before.push([
       'payment_refused',
       () =>
-        new DescribeClient({
+        testClient({
           fetchImpl: stranger.fetch,
           payer: { pay: async () => 'never' },
         }).walletBreakdown(KNOWN),
@@ -710,7 +745,7 @@ describe('post-settlement evidence', () => {
     before.push([
       'http_5xx on the FIRST ask',
       () =>
-        new DescribeClient({
+        testClient({
           fetchImpl: down.fetch,
           payer: { pay: async () => 'never' },
         }).walletBreakdown(KNOWN),
@@ -720,7 +755,7 @@ describe('post-settlement evidence', () => {
     before.push([
       'the payer itself declined',
       () =>
-        new DescribeClient({
+        testClient({
           fetchImpl: declined.fetch,
           payer: {
             pay: async () => {
@@ -747,10 +782,273 @@ describe('constructor', () => {
 
   it('trims a trailing slash off baseUrl so paths never double up', async () => {
     const server = mockServer({ '/health': { body: HEALTH } });
-    const client = new DescribeClient({ baseUrl: 'https://api.describe.net/', fetchImpl: server.fetch });
+    const client = testClient({ baseUrl: 'https://api.describe.net/', fetchImpl: server.fetch });
 
     await client.health();
 
     expect(server.calls[0].path).toBe('/health');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aporte ① — the jitter, wired. KarmaKadabra, 2026-08-30.
+//
+// The draw itself is tested purely in `jitter.test.ts`; these three pay for a
+// real timer because PLACEMENT is the part that can be wrong, and placement is
+// only visible from outside. `Math.random` is stubbed so every bound below is
+// exact — a timing test that hopes is a flaky test.
+// ---------------------------------------------------------------------------
+
+describe('the jitter is where it says it is', () => {
+  /** Draw near the top of the window, so the delay is deterministic. */
+  const pinRandom = (value: number) => vi.spyOn(Math, 'random').mockReturnValue(value);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sleeps before a free request, and jitterMs: 0 does not', async () => {
+    pinRandom(0.99);
+    const server = mockServer({ '/health': { body: HEALTH } });
+
+    const slowStart = Date.now();
+    await new DescribeClient({ fetchImpl: server.fetch, jitterMs: 60 }).health();
+    const slept = Date.now() - slowStart;
+
+    const fastStart = Date.now();
+    await new DescribeClient({ fetchImpl: server.fetch, jitterMs: 0 }).health();
+    const notSlept = Date.now() - fastStart;
+
+    // Discriminant: delete `await this.jitter()` from `request()` and the first
+    // number collapses onto the second.
+    expect(slept).toBeGreaterThanOrEqual(50);
+    expect(notSlept).toBeLessThan(40);
+  });
+
+  it('MOUNTS THE BAD STATE: a paid call sleeps TWICE, because it makes two requests', async () => {
+    // The discriminant of the correction of 2026-08-30. The rule was first
+    // written as "once per public call, before the FIRST request", which reads
+    // as the careful choice and is a hole: the 402 and its replay are two
+    // arrivals at describe.net, and dispersing only the first lets 27 agents
+    // replay in the same instant. Put the jitter back into `getJson()` /
+    // `getPaidJson()` and this goes red at one sleep instead of two.
+    pinRandom(0.99);
+    const path = `/reputation/wallet/${KNOWN}`;
+    const server = mockServer({
+      [`${path}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${path}#2`]: { body: WALLET_BREAKDOWN, headers: { 'X-Payment-Receipt': SETTLEMENT_TX } },
+    });
+    const client = new DescribeClient({
+      fetchImpl: server.fetch,
+      jitterMs: 60,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const started = Date.now();
+    await client.walletBreakdown(KNOWN);
+    const elapsed = Date.now() - started;
+
+    expect(server.calls).toHaveLength(2);
+    expect(elapsed).toBeGreaterThanOrEqual(100); // two sleeps of ~59 ms
+  });
+
+  it('a garbage jitterMs falls back to the DEFAULT, never to off', async () => {
+    // The house rule for a calibrable value: garbage gives the default, never an
+    // exception and never silence. Off would be the dangerous reading — a typo
+    // would remove a protection the whole ecosystem shares. 0.05 of the 400 ms
+    // default is 20 ms: measurable, and cheap enough for the offline loop.
+    pinRandom(0.05);
+    const server = mockServer({ '/health': { body: HEALTH } });
+    const client = new DescribeClient({ fetchImpl: server.fetch, jitterMs: -1 });
+
+    const started = Date.now();
+    await client.health();
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aporte ③ — a hash field that is not a hash. KarmaKadabra, 2026-08-30.
+//
+// *"Un 200 que no hizo la cosa es peor que un 503, porque el cliente lo toma por
+// bueno: si nosotros no chequeáramos el tx, habríamos contado 14 ratings que no
+// existen."*
+// ---------------------------------------------------------------------------
+
+describe('a malformed hash is dropped, marked and announced — never thrown', () => {
+  const PATH = '/reputation/agent/base/42';
+
+  /** A real Solana signature, `GET /feed?network=solana` on 2026-08-30. */
+  const SOLANA_TX =
+    '2va3P3Q664cT3Zae88Fi3LMvpKWZt1J7c7TyzJHNd8pLczbwgLbwA6hELp7eAjdnwgES2cQoq42wCPtHSy9CTXjJ';
+
+  const agentBody = (ratings: unknown[]) => ({
+    network: 'base',
+    agent_id: '42',
+    score: 83.0,
+    review_count: ratings.length,
+    ratings,
+    policy_version: 'equal-weight-per-chain@2',
+  });
+
+  /** Pay once, then answer with `body`. Returns the client and what it announced. */
+  const paidRun = (body: unknown, headers: Record<string, string> = {}) => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { body, headers: { 'X-Payment-Receipt': SETTLEMENT_TX, ...headers } },
+    });
+    const seen: DescribeFailure[] = [];
+    const client = testClient({
+      fetchImpl: server.fetch,
+      onFailure: (f) => seen.push(f),
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+    return { client, seen };
+  };
+
+  it('drops the value, marks the field, and hands back the rest of the answer', async () => {
+    const { client, seen } = paidRun(
+      agentBody([{ client: '0xrater', tx_hash: '0x', feedback_index: 1, value: 100 }]),
+    );
+
+    const agent = await client.agent('base', 42);
+
+    // The read SURVIVES: a bad accessory field must not destroy a decomposition
+    // the caller has already paid for.
+    expect(agent.score).toBe(83);
+    expect(agent.ratings[0].txHash).toBeNull();
+    expect(agent.ratings[0].malformedHashes).toEqual(['tx_hash']);
+    // ...and it is announced on the channel the consumer is already watching.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe('malformed_hash');
+    expect(seen[0].error).toBeInstanceOf(DescribeMalformedHash);
+    expect((seen[0].error as DescribeMalformedHash).fields).toEqual(['ratings[0].tx_hash']);
+    expect(seen[0].transient).toBe(false);
+    // The value as served is still reachable: `raw` keeps the body verbatim.
+    expect((agent.raw.ratings as Array<{ tx_hash: string }>)[0].tx_hash).toBe('0x');
+  });
+
+  it('MOUNTS THE BAD STATE: an ABSENT hash is not a malformed one', async () => {
+    // R1, one level below where it normally lives. `tx_hash: null` is
+    // documented and normal ("null until the log scan reaches this entry"). If
+    // absence ever started firing this alarm, every consumer would learn to
+    // ignore an alarm that is right the rest of the time.
+    const { client, seen } = paidRun(
+      agentBody([{ client: '0xrater', tx_hash: null, feedback_index: 1, value: 100 }]),
+    );
+
+    const agent = await client.agent('base', 42);
+
+    expect(agent.ratings[0].txHash).toBeNull();
+    expect(agent.ratings[0].malformedHashes).toEqual([]);
+    expect(seen).toEqual([]); // nothing was swallowed, so nothing is announced
+  });
+
+  it('MOUNTS THE BAD STATE: a real Solana signature is NOT malformed', async () => {
+    // The false positive that would have shipped with an EVM-only regex, seen
+    // from outside: one of the eleven chains screaming on every read.
+    const { client, seen } = paidRun(
+      agentBody([{ client: '0xrater', tx_hash: SOLANA_TX, feedback_index: 1, value: 100 }]),
+    );
+
+    const agent = await client.agent('base', 42);
+
+    expect(agent.ratings[0].txHash).toBe(SOLANA_TX);
+    expect(agent.ratings[0].malformedHashes).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  it('locates every one of them, in order, with wire names', async () => {
+    const { client, seen } = paidRun(
+      agentBody([
+        { client: '0xa', tx_hash: SOLANA_TX, feedback_index: 1, value: 100 },
+        { client: '0xb', tx_hash: 'undefined', revoked_tx: 'null', feedback_index: 2, value: 50 },
+      ]),
+    );
+
+    await client.agent('base', 42);
+
+    expect((seen[0].error as DescribeMalformedHash).fields).toEqual([
+      'ratings[1].tx_hash',
+      'ratings[1].revoked_tx',
+    ]);
+  });
+
+  it('the receipt header gets the same check, and `pending` passes it', async () => {
+    const bad = paidRun(agentBody([]), { 'X-Payment-Receipt': 'rcpt_abc123' });
+    const agent = await bad.client.agent('base', 42);
+
+    expect(agent.payment).toEqual({ receipt: null, reused: false, malformedHashes: ['receipt'] });
+    expect((bad.seen[0].error as DescribeMalformedHash).fields).toEqual(['payment.receipt']);
+    // `raw` is the BODY, so this is the one malformed value it cannot preserve.
+    // It survives in the message or it is lost.
+    expect(bad.seen[0].error.message).toContain('rcpt_abc123');
+
+    const pending = paidRun(agentBody([]), { 'X-Payment-Receipt': 'pending' });
+    const ok = await pending.client.agent('base', 42);
+
+    // The happy path of a freshly settled payment. Alarming here would be the
+    // alarm that screams about good data.
+    expect(ok.payment).toEqual({ receipt: 'pending', reused: false, malformedHashes: [] });
+    expect(pending.seen).toEqual([]);
+  });
+
+  it('a garbage receipt may not be called proof of settlement', async () => {
+    // The failure path keeps the served string — there it is forensic evidence,
+    // not a typed field — but `settlement` may not claim `'settled'` on the
+    // strength of something that is not a hash. `'settled'` means we hold it.
+    const path = `/reputation/wallet/${KNOWN}`;
+    const server = mockServer({
+      [`${path}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${path}#2`]: { status: 500, body: {}, headers: { 'X-Payment-Receipt': 'rcpt_abc123' } },
+    });
+    const client = testClient({
+      fetchImpl: server.fetch,
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const err = await client.walletBreakdown(KNOWN).catch((e) => e);
+
+    expect(failedAfterPaying(err)).toBe(true);
+    expect(err.payment.settlement).toBe('unknown');
+    expect(err.payment.receipt).toBe('rcpt_abc123'); // kept, for the reconciliation
+  });
+
+  it('an observer that throws does not destroy a response that was paid for', async () => {
+    // The one call site where a throwing callback would cost real money: it
+    // fires AFTER settlement, on a successful read. `guard()`'s call site is
+    // deliberately not wrapped — there the answer is already null.
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: {
+        body: agentBody([{ client: '0xa', tx_hash: '0x', feedback_index: 1, value: 100 }]),
+        headers: { 'X-Payment-Receipt': SETTLEMENT_TX },
+      },
+    });
+    const client = testClient({
+      fetchImpl: server.fetch,
+      onFailure: () => {
+        throw new Error('the consumer logger is broken');
+      },
+      payer: { pay: async () => 'SIGNED-ENVELOPE' },
+    });
+
+    const agent = await client.agent('base', 42);
+
+    expect(agent.score).toBe(83);
+  });
+
+  it('the notice is never a throw, and failOpen never covers it', async () => {
+    // `DescribeMalformedHash` exists to ride a typed channel, not to be caught.
+    // A read that succeeded has nothing to fail open INTO, which is why it is
+    // `serviceFault: false`.
+    const { client, seen } = paidRun(
+      agentBody([{ client: '0xa', tx_hash: 'nope', feedback_index: 1, value: 100 }]),
+    );
+
+    await expect(client.agent('base', 42)).resolves.toBeDefined();
+    expect(failOpenCovers(seen[0].error)).toBe(false);
+    expect(seen[0].error.serviceFault).toBe(false);
   });
 });

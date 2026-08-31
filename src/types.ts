@@ -61,8 +61,28 @@ export type Timestamp = string | null;
  * charge. Present only on metered responses that actually went through payment.
  */
 export interface PaymentEvidence {
+  /**
+   * The settlement id, or `null` when none was served **or when what was served
+   * was not one** — `malformedHashes` tells the two apart.
+   *
+   * Validated with its own rule (`hashes.looksLikeSettlementReceipt`) because
+   * this is the one field where `"pending"` is a legitimate value: the live
+   * OpenAPI declares the header as the settlement transaction hash *"or
+   * `pending` if settlement has not reported one"*. Treating that as garbage
+   * would fire an alarm on the happy path of every fresh payment.
+   */
   receipt: string | null;
   reused: boolean;
+  /**
+   * `['receipt']` when the header carried something that is neither a hash nor
+   * `pending`. Empty in the normal case, and empty when no header came at all.
+   *
+   * ⚠️ This is the one malformed value that does NOT survive in a result's
+   * `raw`, and the reason is structural: `raw` is the response BODY and this
+   * arrived as a header. So the offending string is put in the `onFailure`
+   * message instead — it is the only place it can be kept.
+   */
+  malformedHashes: string[];
 }
 
 /**
@@ -219,9 +239,23 @@ export interface Facet {
 /** A citable computation: same `inputsDigest`, same numbers. */
 export interface Snapshot {
   id: number;
-  inputsDigest: string;
+  /**
+   * A bare `sha256` hexdigest — 64 hex, **no `0x`** (`aggregate.py:1920`).
+   *
+   * `null` when it did not come **or** when what came was not a digest;
+   * `malformedHashes` is what tells those apart. It is nullable rather than `''`
+   * on purpose: this is the field that makes an answer citable, and an empty
+   * string here would be a citation to nothing wearing the clothes of a
+   * citation.
+   */
+  inputsDigest: string | null;
   policyVersion: string;
   computedAt: string;
+  /**
+   * `['inputs_digest']` when the digest arrived malformed. Empty means "nothing
+   * arrived malformed" — it says nothing about what arrived.
+   */
+  malformedHashes: string[];
 }
 
 /**
@@ -251,7 +285,15 @@ export interface WalletBreakdown extends Sealed {
 // GET /reputation/agent/{network}/{agent_id} — metered, $0.02
 // ---------------------------------------------------------------------------
 
-/** One rating, at the grain. `tag1`/`tag2` are on-chain free text: escape them. */
+/**
+ * One rating, at the grain. `tag1`/`tag2` are on-chain free text: escape them.
+ *
+ * 🔴 **Its three hash fields arrive shape-validated** (`txHash`, `feedbackHash`,
+ * `revokedTx`) — KarmaKadabra's contribution of 2026-08-30, from *"el 200 sin
+ * tx"*. Anything that is not a hash is dropped to `null` and its wire name goes
+ * into `malformedHashes`. **Absent and malformed are not the same thing**: read
+ * the list, not the `null`. See `hashes.ts`.
+ */
 export interface Rating {
   client: string;
   feedbackIndex: number;
@@ -262,6 +304,13 @@ export interface Rating {
   tag2: string | null;
   isRevoked: boolean;
   isSelf: boolean;
+  /**
+   * The transaction that wrote this rating — `0x` + 64 hex on the EVM chains, a
+   * base58 signature on Solana. `null` means it did not come **or** it came
+   * malformed; `malformedHashes` separates them. The schema's own note: *"null
+   * until the log scan reaches this entry, not null forever"*, so a hole here is
+   * normal and is not reported.
+   */
   txHash: string | null;
   blockNumber: number | null;
   logIndex: number | null;
@@ -270,8 +319,26 @@ export interface Rating {
   issuerHost: string | null;
   issuer: string | null;
   issuerOrg: string | null;
+  /**
+   * The content hash the rater committed to. `bytes32`, so `0x` + 64 hex — and
+   * **NULL on purpose on Solana** (`solana_indexer.py`), so absence here is
+   * correct and is not reported.
+   *
+   * ⚠️ A well-shaped hash is not a meaningful one: an EVM rater that declared
+   * nothing writes 32 zero bytes, which passes the shape check as
+   * `0x0000…0000`. This SDK will not decide that for you — a shape check says
+   * "this could be a hash", never "this hash means something".
+   */
   feedbackHash: string | null;
+  /** The transaction that killed this rating, if it was revoked. Same shapes. */
   revokedTx: string | null;
+  /**
+   * Which of the three hash fields above arrived with something that is not a
+   * hash. Empty in the normal case.
+   *
+   * 🔴 Branch on this, not on `txHash === null`.
+   */
+  malformedHashes: string[];
 }
 
 /** Whether reputation was inherited across an identity transfer. */

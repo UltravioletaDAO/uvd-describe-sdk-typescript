@@ -37,6 +37,51 @@ export const DEFAULT_SITE_URL = 'https://describe.net';
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
+ * 400 ms, **on by default**, and the default is the decision — so here is the
+ * argument, because it is the one thing about this package that spends the
+ * caller's latency without being asked.
+ *
+ * The number is not ours: it is what **KarmaKadabra** sleeps before every read
+ * (`random.uniform(0, 0.4)`), contributed on 2026-08-30 with the measurement
+ * that produced it — *"27 agentes despiertan al MISMO tiempo por EventBridge y
+ * pegan simultáneo contra su límite de rps COMPARTIDO con los otros
+ * consumidores. Sin jitter, un enjambre es un DDoS educado."* They run the
+ * largest fleet against this index, so their calibration beats our taste.
+ *
+ * ## Why ON, when a library that sleeps unasked is a surprise
+ *
+ * The surprise is real and it is the honest objection. Three things outweigh it:
+ *
+ *   1. **The cost of the mistake does not land on whoever makes it.** The rate
+ *      limit is shared with no per-partner bucket (see `userAgent` below), so an
+ *      unjittered swarm is paid for by the OTHER consumer, who gets the 429 and
+ *      has no lever to fix it. When the cost of a default falls on someone who
+ *      cannot change it, the default has to be the safe one.
+ *   2. **Opt-out is discoverable; opt-in is not.** `jitterMs: 0` is one field
+ *      away and typed. The other direction cannot be found by reading your own
+ *      code: you learn you needed jitter from someone else's incident, and by
+ *      then you have already spent their budget. KarmaKadabra's own framing —
+ *      whoever writes a single script never finds out the problem exists until
+ *      they have a fleet.
+ *   3. **It is bounded and small against this package's own numbers.** At most
+ *      400 ms, 200 ms on average, against a 30 000 ms timeout and a provider
+ *      cold start measured at 15,2 s. And it is the same shape of default this
+ *      client already ships: `failOpen: true` also changes behaviour without
+ *      being asked, for the same reason — the safe thing, loudly documented,
+ *      with one field to turn it off.
+ *
+ * ## What is NOT written here, on purpose
+ *
+ * The rate limit itself. KarmaKadabra's own note cited 20 rps, which was the
+ * documentation's figure and is now stale (it is 50 sustained / burst 40 since
+ * 2026-08-28). A number that has already gone stale once in one hop between two
+ * teams does not belong in a constant: **the `RateLimit-Policy` response header
+ * is the authority**, and this value is calibrated against a fleet size, not
+ * against a ceiling. See the correction in `userAgent`.
+ */
+export const DEFAULT_JITTER_MS = 400;
+
+/**
  * The treasury this SDK will pay, and NOTHING else.
  *
  * Read live from the 402 challenge of `GET /reputation/wallet/{w}` on

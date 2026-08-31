@@ -82,16 +82,46 @@
  * hand every consumer a staleness they did not choose. Documented in the README
  * with MeshRelay's shape as the recipe.
  *
+ * ⚠️ **Ratified 2026-08-30 by the only consumer that has a cache.** MeshRelay
+ * reviewed this decision in `#agents` and agreed the cache must not move into
+ * the library: *"una librería que decide cuánto tiempo miente por vos es peor
+ * que una que no cachea"*. The paragraph above now has two signatures, not one —
+ * which is the difference between a preference and a decision.
+ *
  * **No retry.** Same reason, plus a measured one: MeshRelay retries a transient
  * failure at most ONCE, "hammering a permanent failure is how EM turned one
  * error into a four-hour storm" (`describenet.js:150-151`). A retry policy
  * inside a library multiplies against whatever the caller already has.
  * `DescribeError.transient` is exported so a caller can build the policy they
  * want on a fact instead of on a string match.
+ *
+ * ## What it DOES do without being asked, and there is exactly one — added 2026-08-30
+ *
+ * **It sleeps `[0, 400) ms` before the first request of every call.** That is
+ * the one thing in this list that goes the other way, so it carries the burden
+ * of proof: the number and the measurement are KarmaKadabra's (27 agents on one
+ * EventBridge schedule, against a rate limit shared with no per-partner bucket —
+ * *"sin jitter, un enjambre es un DDoS educado"*), and the argument for shipping
+ * it ON is in `config.ts::DEFAULT_JITTER_MS`. `jitterMs: 0` turns it off.
+ *
+ * It is NOT the retry policy above wearing a different hat, and `jitter.ts`
+ * spells out why: jitter disperses a herd that has not asked for anything yet,
+ * backoff yields to a service that has already said no. The first goes before
+ * the first request; the second would go before a retry this package does not
+ * have.
+ *
+ * ## The second thing `onFailure` announces — added 2026-08-30
+ *
+ * A hash field that arrives as something other than a hash is dropped to `null`
+ * and announced as `kind: 'malformed_hash'` (KarmaKadabra's *"el 200 sin tx"*;
+ * see `hashes.ts` and `announceMalformed` below). It does not throw — one bad
+ * accessory field must not destroy a decomposition that was paid for — and it
+ * does not pass through, which is what bit them.
  */
 
 import {
   DEFAULT_BASE_URL,
+  DEFAULT_JITTER_MS,
   DEFAULT_SITE_URL,
   DEFAULT_TIMEOUT_MS,
   TREASURY_EVM,
@@ -101,6 +131,7 @@ import {
   attachPayment,
   DescribeError,
   DescribeHTTPError,
+  DescribeMalformedHash,
   DescribeNotFound,
   DescribePartnerRejected,
   DescribePartnerUnsigned,
@@ -113,6 +144,8 @@ import {
   type PaymentAttempt,
   type X402Challenge,
 } from './errors';
+import { looksLikeSettlementReceipt, malformedHashReport } from './hashes';
+import { jitterDelayMs, sleep } from './jitter';
 import {
   parseAgentReputation,
   parseHealth,
@@ -246,11 +279,26 @@ export interface DescribeClientConfig {
    */
   failOpen?: boolean;
   /**
-   * Where a swallowed failure goes. Called before `null` is returned, always —
-   * and **only** then. The invariant reads in one line: `onFailure` fires if and
-   * only if a method hands back `null` instead of an answer. A failure that
-   * reaches you as a throw is not announced here, because you are already
-   * holding it; the paid routes therefore never call this at all.
+   * Where a swallowed fact goes. **`onFailure` announces everything this client
+   * swallowed, and nothing it handed you.** Two things qualify:
+   *
+   *   1. a `null` returned instead of an answer (the fail-open, free routes
+   *      only) — announced BEFORE the `null`, always;
+   *   2. a hash field dropped because it was not a hash
+   *      (`kind: 'malformed_hash'`, metered routes, added 2026-08-30).
+   *
+   * A failure that reaches you as a throw is never announced here: you are
+   * already holding it.
+   *
+   * ⚠️ **This is a restatement, and the old wording is left because someone will
+   * look for it.** It read: *"fires if and only if a method hands back `null`…
+   * the paid routes therefore never call this at all"*. That was a description
+   * of the only case that existed, not of the rule — and the rule it protected
+   * is that nothing disappears quietly. A field that vanished out of a 200 is
+   * exactly as invisible as a silent fail-open, so it belongs on the same
+   * channel. Filter it in one line if you only page on outages:
+   * `if (f.kind === 'malformed_hash') return;` — it is `transient: false` and
+   * `serviceFault: false`, and the paid routes still never fail open.
    *
    * Leaving this unset with `failOpen: true` is the one configuration this
    * package will not defend: it converts "describe is down" into "this wallet
@@ -259,6 +307,30 @@ export interface DescribeClientConfig {
    * read-only client, but the README says it plainly and so does this comment.
    */
   onFailure?: (failure: DescribeFailure) => void;
+  /**
+   * Sleep a random `[0, jitterMs)` before **every** request, so a fleet waking
+   * on one schedule does not arrive as one spike. **Default 400**, and `0` turns
+   * it off.
+   *
+   * ⚠️ *Every* request, the replay of a paid one included: a method that fires
+   * two requests sleeps twice. The intuitive rule — once per public call — was
+   * written here first and is wrong, because it disperses the first request and
+   * lets the rest out in a pack. `jitter()` below carries the correction and the
+   * call site in KarmaKadabra's own code that settles it.
+   *
+   * The number and the reason are KarmaKadabra's, measured on a fleet of 27
+   * (2026-08-30) — see `config.ts::DEFAULT_JITTER_MS` for why it ships ON, and
+   * `jitter.ts` for why this is not backoff and why it is not a CSPRNG.
+   *
+   * Set it to `0` in your own unit tests: a suite that sleeps 200 ms per mocked
+   * call is paying for a behaviour it is not testing. This package's own suite
+   * does exactly that.
+   *
+   * A value that is not a finite number ≥ 0 falls back to the **default**, not
+   * to off: a typo must not silently remove a protection the rest of the
+   * ecosystem is relying on. Only a real `0` disables it.
+   */
+  jitterMs?: number;
   /** Pay metered routes. Without it, a 402 throws `DescribePaymentRequired`. */
   payer?: X402Payer;
   /**
@@ -309,6 +381,7 @@ export class DescribeClient {
   private readonly ua: string;
   private readonly failOpen: boolean;
   private readonly onFailure?: (failure: DescribeFailure) => void;
+  private readonly jitterMs: number;
   private readonly payer?: X402Payer;
   private readonly partner?: PartnerSigner;
   private readonly partnerFallsBackToPaying: boolean;
@@ -321,6 +394,14 @@ export class DescribeClient {
     this.ua = userAgent(config.product);
     this.failOpen = config.failOpen ?? true;
     this.onFailure = config.onFailure;
+    // Garbage falls back to the DEFAULT, never to off, and never throws here: a
+    // mistyped option must not silently drop a protection the rest of the
+    // ecosystem relies on, and a library that dies in its constructor over one
+    // is worse than one that ignores it. Only a real 0 disables the jitter.
+    this.jitterMs =
+      typeof config.jitterMs === 'number' && Number.isFinite(config.jitterMs) && config.jitterMs >= 0
+        ? config.jitterMs
+        : DEFAULT_JITTER_MS;
     this.payer = config.payer;
     this.partner = config.partner;
     this.partnerFallsBackToPaying = config.partnerFallsBackToPaying ?? false;
@@ -429,8 +510,10 @@ export class DescribeClient {
    */
   async walletBreakdown(address: string): Promise<WalletBreakdown> {
     const path = `/reputation/wallet/${encodeURIComponent(address)}`;
-    const { body, payment } = await this.getPaidJson(path);
-    return parseWalletBreakdown(body, payment);
+    const { body, payment, servedReceipt } = await this.getPaidJson(path);
+    const result = parseWalletBreakdown(body, payment);
+    this.announceMalformed(path, result, servedReceipt);
+    return result;
   }
 
   /**
@@ -442,8 +525,10 @@ export class DescribeClient {
    */
   async agent(network: string, agentId: string | number): Promise<AgentReputation> {
     const path = `/reputation/agent/${encodeURIComponent(network)}/${encodeURIComponent(String(agentId))}`;
-    const { body, payment } = await this.getPaidJson(path);
-    return parseAgentReputation(body, payment);
+    const { body, payment, servedReceipt } = await this.getPaidJson(path);
+    const result = parseAgentReputation(body, payment);
+    this.announceMalformed(path, result, servedReceipt);
+    return result;
   }
 
   // -------------------------------------------------------------------------
@@ -491,6 +576,97 @@ export class DescribeClient {
   }
 
   /**
+   * The pause that disperses a fleet. **Before EVERY request** — called from the
+   * top of `request()` and from nowhere else, so a method that makes two
+   * requests sleeps twice.
+   *
+   * ⚠️ **Corrected 2026-08-30, and the wrong version is left written because it
+   * is the intuitive one and someone will want it back.** This first sat in
+   * `getJson()` / `getPaidJson()`, i.e. *once per public call, before the FIRST
+   * request*, on the theory that the metered flow should not sleep twice. That
+   * is a hole: a call that fires N requests would disperse one of them and let
+   * the other N−1 out in a pack, which is the exact problem this contribution
+   * came to fix. KarmaKadabra's own call site settles it — their sleep lives
+   * inside the function that performs the GET (`reputation_scan.py:123`), and
+   * that function runs twice on their real path (`:242` for the EVM address,
+   * `:245` for the Solana one). Their jitter is per REQUEST, and the reason they
+   * wrote beside it (`:121-122`) is per-PROCESS: agents that wake together
+   * against a shared ceiling.
+   *
+   * The paid replay sleeps too, and that was the hardest half of the correction
+   * to accept. The argument for exempting it was that delaying a signed envelope
+   * widens the window in which a crash loses a receipt — but the challenge this
+   * client answers carries `maxTimeoutSeconds: 120`, so 400 ms is a third of a
+   * percent of the envelope's own validity, while the herd argument applies to
+   * the replay in full: 27 agents that get their 402 in the same second replay
+   * in the same second.
+   *
+   * **Before the signature, and before the clock.** `request()` calls this
+   * first, so an ERC-8128 signature is never left ageing against its 300 s
+   * window while we sleep, and the sleep is not charged to `timeoutMs`.
+   */
+  private async jitter(): Promise<void> {
+    const ms = jitterDelayMs(this.jitterMs);
+    if (ms > 0) await sleep(ms);
+  }
+
+  /**
+   * Announce a malformed hash field, if there is one — KarmaKadabra's *"el 200
+   * sin tx"*, reaching the caller.
+   *
+   * ⚠️ **This is the second thing `onFailure` announces, and invariant 4 is
+   * restated rather than broken.** It used to read *"`onFailure` fires if and
+   * only if a method hands back `null`"*, and that wording was a description of
+   * the only case that existed on 2026-08-30 at noon. The rule it was protecting
+   * is bigger and now reads: **`onFailure` announces everything that was
+   * silently swallowed — a `null` handed back instead of an answer, and a field
+   * dropped because it was not what it claimed to be — and nothing that reaches
+   * you as a throw.** A failure you are holding does not need announcing; a
+   * field that vanished out of a 200 does, and it is exactly as invisible as a
+   * silent fail-open.
+   *
+   * That is why it is not a second callback: the channel a consumer is already
+   * watching is where KarmaKadabra asked for this to land, and a new one would
+   * be a channel nobody wired. The notice is filterable in one line
+   * (`f.kind === 'malformed_hash'`), carries `transient: false` and
+   * `serviceFault: false`, and the error it carries is never thrown.
+   *
+   * 🔴 The callback is wrapped, and this call site is the reason: it fires after
+   * a metered read that already SETTLED. An observer that throws would destroy a
+   * response the caller paid for, which is the same class of bug as swallowing a
+   * receipt — with the sign flipped. (The `guard()` call site is deliberately
+   * left unwrapped: there the answer is already `null`, so a throwing observer
+   * costs nothing that was bought.)
+   */
+  private announceMalformed(
+    path: string,
+    result: Parameters<typeof malformedHashReport>[0],
+    servedReceipt: string | null,
+  ): void {
+    const fields = malformedHashReport(result);
+    if (fields.length === 0) return;
+    // The receipt is the ONE malformed value `raw` cannot preserve — `raw` is
+    // the body and that arrived as a header — so it is quoted here or it is
+    // lost. Truncated because a field that is not a hash can be anything: the
+    // longest `tag1` in this index is 471 characters of prose.
+    const quoted =
+      fields.includes('payment.receipt') && servedReceipt !== null
+        ? ` The receipt as served was ${JSON.stringify(servedReceipt.slice(0, 120))}.`
+        : '';
+    const error = new DescribeMalformedHash(
+      `GET ${path} served ${fields.length} field(s) that are not hashes: ${fields.join(', ')}. ` +
+        'Each one was dropped to null; every other value as served is still in `raw`. ' +
+        `Nothing was retried and nothing else in the answer was touched.${quoted}`,
+      fields,
+    );
+    try {
+      this.onFailure?.({ path, error, kind: error.kind, transient: false });
+    } catch {
+      // An observer that throws must not destroy a response that was paid for.
+    }
+  }
+
+  /**
    * The partner headers for one request, or `{}` when there is no partner.
    *
    * 🔴 THIS RUNS OUTSIDE `request()`'s try/catch AND THAT IS THE WHOLE POINT.
@@ -510,6 +686,12 @@ export class DescribeClient {
   }
 
   private async request(path: string, headers: Record<string, string> = {}): Promise<Response> {
+    // Every request, not every call: see `jitter()` for the correction and for
+    // the KarmaKadabra call site that settles it. It runs before the signature
+    // (which would otherwise age against its 300 s window) and before the timer
+    // (so the sleep is not charged to `timeoutMs`).
+    await this.jitter();
+
     // Signed BEFORE the timer starts and before the try: see `partnerHeaders`.
     const signed = await this.partnerHeaders(path);
 
@@ -572,12 +754,12 @@ export class DescribeClient {
    */
   private async getPaidJson(
     path: string,
-  ): Promise<{ body: unknown; payment: PaymentEvidence | null }> {
+  ): Promise<{ body: unknown; payment: PaymentEvidence | null; servedReceipt: string | null }> {
     const first = await this.request(path);
 
     if (first.ok) {
       // Free-tier or already-settled. No charge, so no evidence to report.
-      return { body: await this.readJson(first, path), payment: null };
+      return { body: await this.readJson(first, path), payment: null, servedReceipt: null };
     }
 
     if (first.status === 404) {
@@ -644,7 +826,14 @@ export class DescribeClient {
       // A receipt is the settlement transaction hash, put there by the seller:
       // proof, not inference. Its absence proves nothing — an unhandled 500 is
       // rendered above the paywall middleware and never gets the header.
-      settlement: receipt ? 'settled' : 'unknown',
+      //
+      // ⚠️ Since 2026-08-30 the header must also LOOK like a settlement id (a
+      // hash, or the `pending` the OpenAPI declares) before it may be called
+      // proof. `'settled'` means *we hold the hash*, and a string that is not
+      // one is not one. The value is still carried in `receipt` — on this path
+      // it is forensic evidence, not a typed field — and `'unknown'` is the
+      // honest verdict: ask the chain.
+      settlement: receipt !== null && looksLikeSettlementReceipt(receipt) ? 'settled' : 'unknown',
       receipt,
       reused: reused === null ? null : reused.toLowerCase() === 'true',
       status: second.status,
@@ -677,9 +866,27 @@ export class DescribeClient {
       throw attachPayment(error, attempt);
     }
 
+    // The receipt is a hash too, and it is the one hash the caller is most
+    // likely to carry somewhere — to an explorer, to a support ticket, to a
+    // reconciliation. So it gets the same shape check as every other hash field
+    // (KarmaKadabra, 2026-08-30), with its own predicate: `pending` is a value
+    // the seller's OpenAPI declares legitimate, and calling it garbage would
+    // fire an alarm on the happy path of every freshly settled payment.
+    //
+    // 🔴 Only the SUCCESS path nulls a malformed receipt. On the failure path
+    // (`attempt`, above) the served string is kept verbatim, because there it is
+    // forensic evidence rather than a typed field — what changes there is that
+    // `settlement` may not claim `'settled'` on the strength of a string that is
+    // not a hash. `'settled'` means *we hold the hash*, and we do not.
+    const receiptOk = receipt !== null && looksLikeSettlementReceipt(receipt);
     return {
       body,
-      payment: { receipt, reused: (reused ?? '').toLowerCase() === 'true' },
+      payment: {
+        receipt: receiptOk ? receipt : null,
+        reused: (reused ?? '').toLowerCase() === 'true',
+        malformedHashes: receipt !== null && !receiptOk ? ['receipt'] : [],
+      },
+      servedReceipt: receipt,
     };
   }
 

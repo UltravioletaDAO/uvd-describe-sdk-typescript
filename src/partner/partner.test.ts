@@ -39,7 +39,7 @@ import { verifyRequest, type VerifyPolicy } from 'uvd-x402-sdk/erc8128';
 
 import { CHALLENGE_402 } from '../__fixtures__/live';
 import { mockServer } from '../__fixtures__/server';
-import { DescribeClient, type DescribeFailure } from '../client';
+import { DescribeClient, type DescribeClientConfig, type DescribeFailure } from '../client';
 import {
   DescribeError,
   DescribePartnerRejected,
@@ -51,6 +51,15 @@ import { partnerFromEnv, partnerFromSigner, syntheticTestKey } from './index';
 
 const WALLET = '0x97cd97cfe21799bacbf39d0a53469e5f82f30996';
 const METERED = `/reputation/wallet/${WALLET}`;
+
+/**
+ * Jitter off, same reason as in `client.test.ts`: the sleep ships ON (400 ms
+ * max, KarmaKadabra's number) and buys nothing against a mock that answers
+ * instantly. A helper rather than 9 repetitions, so the day the default moves
+ * this file has one line to argue with.
+ */
+const testClient = (config: DescribeClientConfig = {}) =>
+  new DescribeClient({ jitterMs: 0, ...config });
 
 /** The synthetic vector key. Public, in everyone's node_modules, never funded. */
 const testWallet = new ethers.Wallet(`0x${syntheticTestKey()}`);
@@ -207,7 +216,7 @@ describe('the signature the gate accepts', () => {
 describe('an allowlisted partner reads the metered routes for free', () => {
   it('gets a 200 with no payer configured at all', async () => {
     const server = gatedServer([testWallet.address]);
-    const client = new DescribeClient({ fetchImpl: server.fetch, partner: goodSigner() });
+    const client = testClient({ fetchImpl: server.fetch, partner: goodSigner() });
 
     const result = await client.walletBreakdown(WALLET);
 
@@ -224,7 +233,7 @@ describe('an allowlisted partner reads the metered routes for free', () => {
     // service's pricing.TIERS, and it would silently start paying the day a
     // free route becomes metered. The server decides; we sign everything.
     const server = gatedServer([testWallet.address], { status: 'ok' });
-    const client = new DescribeClient({ fetchImpl: server.fetch, partner: goodSigner() });
+    const client = testClient({ fetchImpl: server.fetch, partner: goodSigner() });
 
     await client.health();
 
@@ -244,7 +253,7 @@ describe('🔴 a refused rail throws and NEVER falls through to paying', () => {
     // "verifies AND looks up". The server's gate refuses it and charges.
     const server = gatedServer([/* nobody is allowlisted */]);
     const pay = vi.fn(async () => 'SIGNED-ENVELOPE');
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       partner: goodSigner(),
       payer: { pay },
@@ -278,7 +287,7 @@ describe('🔴 a refused rail throws and NEVER falls through to paying', () => {
     // caller is identical — because from here both mean "you are not exempt".
     const server = gatedServer([testWallet.address]);
     const pay = vi.fn(async () => 'SIGNED-ENVELOPE');
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       payer: { pay },
       partner: partnerFromSigner({
@@ -297,7 +306,7 @@ describe('🔴 a refused rail throws and NEVER falls through to paying', () => {
     // this test the default above could be an inability rather than a choice.
     const server = gatedServer([]);
     const pay = vi.fn(async () => 'SIGNED-ENVELOPE');
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       partner: goodSigner(),
       payer: { pay },
@@ -318,7 +327,7 @@ describe('🔴 a refused rail throws and NEVER falls through to paying', () => {
     // message is the first one: "your free rail stopped working" tells you what
     // changed, "you forgot a payer" tells you about a thing you never wanted.
     const server = gatedServer([]);
-    const client = new DescribeClient({ fetchImpl: server.fetch, partner: goodSigner() });
+    const client = testClient({ fetchImpl: server.fetch, partner: goodSigner() });
 
     await expect(client.walletBreakdown(WALLET)).rejects.toBeInstanceOf(DescribePartnerRejected);
   });
@@ -338,7 +347,7 @@ describe('a signer that throws', () => {
 
   it('throws DescribePartnerUnsigned instead of sending an unsigned request', async () => {
     const server = gatedServer([testWallet.address]);
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       partner: brokenPartner,
       payer: { pay: async () => 'SIGNED-ENVELOPE' },
@@ -365,7 +374,7 @@ describe('a signer that throws', () => {
     // silently charged them.
     const server = gatedServer([testWallet.address]);
     const announced: DescribeFailure[] = [];
-    const client = new DescribeClient({
+    const client = testClient({
       fetchImpl: server.fetch,
       partner: brokenPartner,
       failOpen: true,
@@ -381,7 +390,7 @@ describe('a signer that throws', () => {
   it('a client with no partner configured is byte-identical to before', async () => {
     // The rail is opt-in. Nothing about the unconfigured path may move.
     const server = mockServer({ [`/wallets/${WALLET}/chains`]: { body: { wallet: WALLET } } });
-    const client = new DescribeClient({ fetchImpl: server.fetch });
+    const client = testClient({ fetchImpl: server.fetch });
 
     await client.wallet(WALLET);
 

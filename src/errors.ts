@@ -110,6 +110,14 @@ export type DescribeErrorKind =
    */
   | 'payment_refused'
   /**
+   * A hash field arrived carrying something that is not a hash.
+   *
+   * 🔴 **Never thrown.** It travels only through `onFailure`, and the class that
+   * carries it says so in its own first line — see {@link DescribeMalformedHash}.
+   * Branch on this `kind`, never on a `catch` that will not fire.
+   */
+  | 'malformed_hash'
+  /**
    * Partner mode is configured and the signature could not be produced AT ALL.
    *
    * The CALLER's configuration, not describe.net's: an unset env var, a signer
@@ -260,6 +268,65 @@ export class DescribeUnparseable extends DescribeError {
     // retrying an unparseable body buys nothing (`describenet.js:161-164`).
     super('unparseable', message, { transient: false, serviceFault: true, cause });
     this.name = 'DescribeUnparseable';
+  }
+}
+
+/**
+ * A hash field arrived with something that is not a hash.
+ *
+ * Contributed by **KarmaKadabra** (`#agents`, 2026-08-30), out of the finding
+ * they call *"el 200 sin tx"*: *"si nosotros no chequeáramos el tx, habríamos
+ * contado 14 ratings que no existen"*. A 200 that did not do the thing is worse
+ * than a 503, because the client takes it for good.
+ *
+ * 🔴 **THIS IS NEVER THROWN. Do not write a `catch` for it.** It travels only as
+ * the `error` of a {@link DescribeFailure} handed to `onFailure`, and it exists
+ * as a class for one mechanical reason: that channel is typed
+ * `DescribeError`, so reusing the channel the consumer is ALREADY watching —
+ * which is what KarmaKadabra asked for — requires the fact to BE a
+ * `DescribeError`. Branch on `kind === 'malformed_hash'` or on `instanceof`,
+ * never on a `try/catch` that will not fire.
+ *
+ * ⚠️ There is a tension with this taxonomy and it is declared rather than
+ * papered over: `partial_index` is also documented as never raised, and it is
+ * kept only for parity with Execution Market's reference. Publishing exceptions
+ * nobody throws invites dead `catch` blocks. What separates the two is what the
+ * class is FOR: `partial_index` exists so someone can catch it and nobody will,
+ * this one exists to ride a channel that is already typed, and its first line
+ * shouts as much. If `onFailure` ever accepts something wider than a
+ * `DescribeError`, this class stops being necessary.
+ *
+ * Why the failure does NOT take the read down: the rest of the response is very
+ * likely useful, and killing a whole reputation breakdown over an accessory
+ * field would be worse than the bug being hunted — especially on a metered
+ * route, where the read has already been paid for. The typed field is left
+ * `null` so nobody builds an explorer link out of garbage, and the raw value
+ * survives in the result's `raw`, which is where it gets investigated.
+ *
+ * 🔴 **Absent and malformed are NOT the same thing, and the result keeps them
+ * apart** (R1, one level below where it usually lives):
+ *
+ * ```
+ *   rating.txHash === null, malformedHashes empty      → IT DID NOT COME
+ *   rating.txHash === null, 'tx_hash' in malformedHashes → GARBAGE CAME
+ * ```
+ *
+ * `fields` carries the location of each one, with an index when it is inside a
+ * list: `['ratings[3].tx_hash', 'snapshot.inputs_digest']`. Wire names, not
+ * ours, because this string ends up in a ticket to whoever runs the index.
+ *
+ * `serviceFault` is **false** even though the bad data is describe.net's: this
+ * flag drives `failOpen`, and a read that succeeded has nothing to fail open
+ * INTO. `transient` is false for the same kind of reason — the same request will
+ * bring the same bad field back.
+ */
+export class DescribeMalformedHash extends DescribeError {
+  /** Qualified paths of the fields that arrived malformed, in order. */
+  readonly fields: string[];
+  constructor(message: string, fields: string[]) {
+    super('malformed_hash', message, { transient: false, serviceFault: false });
+    this.name = 'DescribeMalformedHash';
+    this.fields = [...fields];
   }
 }
 
