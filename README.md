@@ -188,6 +188,58 @@ announced there — you are already holding it. If you only page on outages,
 `malformed_hash` filters out in one line; it is `transient: false` and
 `serviceFault: false`, so `failOpenCovers()` refuses it too.
 
+### `error.recovery` — what to do *instead*
+
+Contributed by **Execution Market** (`#agents`, 2026-08-30), out of their own 502
+gaining a typed `detail.recovery`:
+
+> *"SIETE de los diez son TERMINALES (`retryable: false`). Eso es lo que más les
+> sirve: hoy su flota no puede distinguir 'reintenta' de 'no insistas', y contra
+> `AUTHORIZATION_EXPIRED` reintentar es quemar llamadas contra una ventana
+> cerrada hace **317 HORAS**."*
+
+`transient` says whether retrying helps and stops there — a `false` leaves you
+holding a failure with no next move. Every `DescribeError` now also carries one
+sentence naming **another** thing to do: another route (usually a free one),
+another field, or the condition on your side that has to be fixed.
+
+```ts
+try {
+  const breakdown = await describe.walletBreakdown(wallet);
+} catch (e) {
+  if (e instanceof DescribeError) {
+    log.warn(e.kind, e.message);
+    if (e.recovery) log.warn('recovery:', e.recovery);
+  }
+}
+```
+
+* 🔴 **Branch on `kind`, read `recovery`.** It is prose, it is free to be
+  re-worded, and matching on it is the mistake the caveat `code`s exist to
+  prevent one level up.
+* The texts are frozen literals in `RECOVERY`, which is exported: pin
+  `RECOVERY.payment_required` in your test instead of matching a sentence.
+* A 402 with no payer points at the free door the challenge names itself
+  (`free_preview.endpoint`, and `see_also` for the rest); a `partner_rejected`
+  tells you to get the wallet allowlisted rather than to pay; a 429 tells you to
+  spread the fleet, because the limit is one shared bucket and the 429 is
+  usually somebody else. A 422 and a 429 are the same `kind` and get **opposite**
+  advice.
+* **`timeout` is `null`, on purpose.** Its only two levers are retrying (which
+  `transient` already announces) and the client timeout, and raising that past
+  the default buys nothing an API Gateway that cuts at 29 s can deliver. A
+  recovery that does not work is worse than none, so the field stays empty and
+  says so.
+* 🔴 It never quotes the exception it came from. A transport error can carry an
+  endpoint with an API key inside, and this is the string most likely to be
+  pasted into a ticket — the same guard describe.net runs server-side
+  (`chain/rpc.py::_redact`), enforced here by having no interpolation at all.
+* **Python parity:** same field name, same text, because a consumer who changes
+  stacks must not read two different pieces of advice for one failure. That is
+  also why a text names only what both SDKs share — routes, headers, wire fields,
+  env vars — and never a `jitterMs`-style spelling, which is `jitter` and in
+  seconds over there.
+
 ### 🔴 Why the metered routes never fail open
 
 Because the line is **money**, not symmetry.

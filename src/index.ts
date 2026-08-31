@@ -93,6 +93,20 @@ export {
 } from './errors';
 export type { DescribeErrorKind, PaymentAttempt, X402Challenge } from './errors';
 
+/**
+ * The recovery table — what to do INSTEAD of the failure you are holding.
+ *
+ * Absorbed from **Execution Market** (`#agents`, 2026-08-30). Every
+ * `DescribeError` already carries its own text in `error.recovery`; the table
+ * is exported so a test can pin one without matching on prose, and so a router
+ * that has not failed yet can read the advice up front. `recoveryFor()` is the
+ * same lookup for a `kind` you hold without an instance.
+ *
+ * 🔴 Read it, never branch on it: `kind` is the enum.
+ */
+export { RECOVERY, recoveryFor } from './recovery';
+export type { RecoveryKey } from './recovery';
+
 export {
   CAVEAT_CODES,
   CAVEAT_SCOPE_FREE,

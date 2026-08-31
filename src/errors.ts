@@ -45,7 +45,28 @@
  * open"). So `DescribeError` gained an optional `payment`, and its mere
  * presence is the statement *"a signed envelope had already left this process
  * when this failed"*. Read it with `failedAfterPaying()`.
+ *
+ * ## The half the booleans never had, added 2026-08-30: what to do INSTEAD
+ *
+ * `transient` answers *would retrying help?* and stops there. A `false` leaves
+ * the caller holding a failure and no next move, which is how a fleet ends up
+ * hammering a door that closed — **Execution Market**, `#agents`, 2026-08-30,
+ * measuring their own: *"contra `AUTHORIZATION_EXPIRED` reintentar es quemar
+ * llamadas contra una ventana cerrada hace 317 HORAS"*. They typed a `recovery`
+ * into their 502 and asked the ecosystem to do the same.
+ *
+ * So every error carries `recovery`: one sentence naming ANOTHER thing to do —
+ * another route (usually a free one), another field, or the condition on the
+ * caller's side that has to be fixed. It is `null` when there honestly is none,
+ * which is a decision and not an omission. The texts live in `recovery.ts`,
+ * frozen, one per kind, and this constructor is the only thing that reads them.
+ *
+ * 🔴 What was NOT copied is their ten codes — escrow, payout wallets,
+ * `AUTHORIZATION_EXPIRED` — because that is their API's vocabulary and this SDK
+ * wraps describe.net. The pattern crossed over; the table was re-derived here.
  */
+
+import { recoveryFor } from './recovery';
 
 /** The closed set. Consumers switch on `kind`, never on `message`. */
 export type DescribeErrorKind =
@@ -223,6 +244,21 @@ export class DescribeError extends Error {
   /** Present when a status was actually received. */
   readonly status?: number;
   /**
+   * What to do INSTEAD, in one sentence — or `null` when there honestly is
+   * nothing beyond the retry `transient` already announces (`timeout` is the
+   * one, and `recovery.ts` says why at the entry).
+   *
+   * 🔴 **Branch on `kind`, read this.** It is prose meant for a human or an
+   * agent, it is free to be re-worded, and matching on it is the mistake the
+   * caveat codes exist to prevent one level up.
+   *
+   * 🔴 It is always one of the frozen literals in `recovery.ts` — never built
+   * from a message, a URL or a `cause`. That is the redaction guard: a
+   * transport exception can carry an endpoint with an API key in it, and this
+   * is the string most likely to end up pasted into a ticket.
+   */
+  readonly recovery: string | null;
+  /**
    * Set **only** when a signed envelope was already in flight. Not readonly for
    * one reason: the failure is built deep in the transport, which knows nothing
    * about payment, and `attachPayment()` stamps it on the way out. Treat it as
@@ -244,6 +280,12 @@ export class DescribeError extends Error {
     this.transient = opts.transient;
     this.serviceFault = opts.serviceFault;
     this.status = opts.status;
+    // Derived here and NOWHERE else: every subclass gets its recovery from the
+    // same table by construction, so none can forget one, invent one, or build
+    // one out of a string that came from outside this package. The status is
+    // passed for the single case where a kind is not fine enough — 429, the one
+    // 4xx that is not the caller's bug.
+    this.recovery = recoveryFor(kind, opts.status);
   }
 }
 

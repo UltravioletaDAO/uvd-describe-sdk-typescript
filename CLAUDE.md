@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **168 tests in ~1,8 s** (re-measured 2026-08-30 after absorbing the three ecosystem contributions; were 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **181 tests in ~1,6 s** (re-measured 2026-08-30 after the `recovery` table, EM's fourth contribution of the day; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
@@ -52,6 +52,7 @@ pay, deliberately.
   index.ts ──> client.ts ──┼──> parse.ts ──> types.ts
    (public)    (fetch,      │     (wire→typed)   (hand-written + schema gate)
                 failOpen,   ├──> errors.ts   (the taxonomy + failOpenCovers)
+                            │     └──> recovery.ts (what to do INSTEAD, literals only)
                 402 flow,   ├──> caveats.ts  (the 8 frozen codes)
                 jitter)     ├──> format.ts   (R8: 83.0 -> "83")
                             ├──> jitter.ts   (the sleep before every request)
@@ -72,6 +73,7 @@ pay, deliberately.
 |---|---|
 | `config.ts` | Every calibrable number and the pinned treasury. Nothing else re-types them |
 | `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only) and the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`) |
+| `recovery.ts` | **What to do INSTEAD** — one frozen sentence per `kind` (Execution Market's contribution, 2026-08-30). Nothing but literals: no call site builds a recovery out of a message, a URL or a `cause`, and that IS the redaction guard. `timeout` is `null` and its entry defends why |
 | `caveats.ts` | The eight codes, as an exported contract. Open union, never closed |
 | `format.ts` | How a score is written down. Two functions, no state |
 | `jitter.ts` | The draw and the only `setTimeout` in the package. Pure `(maxMs, random) → ms`, so its bounds are tested without a clock. KarmaKadabra's 0,4 s, `Math.random` and **never** a CSPRNG |
@@ -179,6 +181,23 @@ pay, deliberately.
    (`scripts/build_lambda_zip.py:64`), so nothing validates it. Validate the ids
    a caller carries somewhere to verify; leave alone the strings that describe a
    build.
+
+11. **`recovery` is a frozen literal, never an interpolation.** Added 2026-08-30
+   from Execution Market's contribution (`#agents`: *"contra
+   `AUTHORIZATION_EXPIRED` reintentar es quemar llamadas contra una ventana
+   cerrada hace 317 HORAS"*). Every error carries one sentence naming ANOTHER
+   thing to do, drawn from `recovery.ts` by the `DescribeError` constructor and
+   from nowhere else. Two halves, and both are load-bearing:
+   🔴 **it never quotes a message, a URL or a `cause`** — a transport exception
+   can carry an endpoint with an API key in it and this is the string people
+   paste into tickets, so the guard is structural (no interpolation exists to
+   forget) rather than a filter, mirroring `chain/rpc.py::_redact` on the
+   service side; and **an empty one is a decision** — `timeout` is `null`
+   because its only levers are the retry `transient` already announces and a
+   timeout that an API Gateway cutting at 29 s makes pointless to raise. A
+   recovery that does not work is worse than none, which is the same failure as
+   the 317 hours one level up. What did NOT cross over: EM's ten codes, which
+   are their API's vocabulary (escrow, payouts) and would be dead branches here.
 
 ## Measured traps
 
