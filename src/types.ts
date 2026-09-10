@@ -229,9 +229,72 @@ export interface SelfRated {
   gap: number | null;
 }
 
+/**
+ * First and last rating by ON-CHAIN time.
+ *
+ * `lastRatingAt` is the last **eligible** rating — the one that holds up the
+ * score being shown. Since describe.net 2026-09-10 it is documented as a
+ * compatibility alias of `Freshness.lastEligibleRatingAt` and keeps that exact
+ * meaning for the life of v1. Read `WalletBreakdown.freshness` for the question
+ * this pair never could answer: *was this subject described recently, whether
+ * or not it counts?*
+ */
 export interface Activity {
   firstRatingAt: Timestamp;
   lastRatingAt: Timestamp;
+}
+
+/**
+ * WHAT the dates are about. A date without a scope is a date that lies.
+ *
+ * `direction` is the field that matters most: `received` is reputation the
+ * subject GOT, `emitted` is the ratings a wallet WROTE
+ * (`GET /reputation/rater/{wallet}`). Reading the second as the first turns a
+ * busy rater into a much-described subject.
+ */
+export interface FreshnessScope {
+  kind: string | null;
+  direction: string | null;
+  id: string | null;
+  network: string | null;
+  declaredType: string | null;
+}
+
+/**
+ * WHEN this subject was last described. Two dates, because two questions.
+ *
+ * - `lastReceivedFeedbackAt` — the last real NewFeedback in scope, whether or
+ *   not it feeds the score.
+ * - `lastEligibleRatingAt` — the last rating that holds up the number shown.
+ *
+ * When the most recent rating was revoked the two differ, and **that difference
+ * is the information**: there was recent activity and the score does not
+ * reflect it.
+ *
+ * NEITHER is `refreshedAt`, which is when the index recomputed its own view and
+ * says nothing about the subject.
+ *
+ * `timestampCoverage` is `none` | `unknown` | `partial` | `complete` over
+ * `dated + undated`. **`none` and `unknown` are different facts**: nothing to
+ * date versus dates we do not have yet.
+ *
+ * NO RELATIVE TEXT, deliberately. The API publishes UTC and nothing else, so
+ * "3 days ago" is derived at the edge with the reader's clock — a serialised
+ * relative string freezes in the first cache.
+ */
+export interface Freshness {
+  scope: FreshnessScope;
+  lastReceivedFeedbackAt: Timestamp;
+  lastEligibleRatingAt: Timestamp;
+  datedFeedbackCount: number;
+  undatedFeedbackCount: number;
+  timestampCoverage: string | null;
+  eligibleDatedCount: number;
+  eligibleUndatedCount: number;
+  eligibleTimestampCoverage: string | null;
+  refreshedAt: Timestamp;
+  indexerCheckedAt: Timestamp;
+  freshnessVersion: string | null;
 }
 
 /** One facet (`tag1`), as declared on-chain. */
@@ -292,6 +355,12 @@ export interface WalletBreakdown extends Sealed {
   concentration: Concentration | null;
   confidence: Confidence | null;
   activity: Activity | null;
+  /**
+   * WHEN, with its scope. Additive: `activity` above keeps its exact meaning.
+   * `null` when the server does not publish the block yet — never an empty
+   * object, so "not published" and "no dates" stay distinguishable.
+   */
+  freshness: Freshness | null;
   snapshot: Snapshot | null;
   /** What was actually paid, if anything was. */
   payment: PaymentEvidence | null;

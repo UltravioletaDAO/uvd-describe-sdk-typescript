@@ -146,7 +146,7 @@ export const PARTNER_KEY_ENV = 'DESCRIBE_PARTNER_PRIVATE_KEY';
  * time instead of at runtime. Bumping the version without the constant is a
  * red test, not a silent lie in someone's access log.
  */
-export const SDK_VERSION = '0.2.0';
+export const SDK_VERSION = '0.3.0';
 
 /** `uvd-describe-sdk-ts/0.1.0`, plus `(+<product>)` when the caller names itself. */
 export const SDK_NAME = 'uvd-describe-sdk-ts';
