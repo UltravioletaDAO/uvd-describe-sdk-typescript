@@ -154,6 +154,8 @@ export {
 
 export type {
   Activity,
+  Freshness,
+  FreshnessScope,
   AgentReputation,
   Concentration,
   Confidence,

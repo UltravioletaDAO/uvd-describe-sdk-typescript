@@ -54,6 +54,7 @@ import { hashField } from './hashes';
 import type {
   Activity,
   AgentReputation,
+  Freshness,
   Concentration,
   Confidence,
   Facet,
@@ -180,6 +181,43 @@ function parseConfidence(v: unknown): Confidence | null {
 function parseActivity(v: unknown): Activity | null {
   if (!isObj(v)) return null;
   return { firstRatingAt: optString(v.first_rating_at), lastRatingAt: optString(v.last_rating_at) };
+}
+
+/**
+ * `null` when the block is absent OR unparseable — never an empty `Freshness`.
+ *
+ * Same rule as every other parser here: a default that looks like data is how a
+ * client stops being able to tell "the server does not publish this" from "the
+ * server has no dates for this subject". The second one is information; the
+ * first one is not.
+ *
+ * The counts go through `num()` so a string count from a stricter serialiser
+ * still lands as a number: freshness is advisory and must not be the reason a
+ * paid response fails to parse.
+ */
+function parseFreshness(v: unknown): Freshness | null {
+  if (!isObj(v)) return null;
+  const scope = isObj(v.scope) ? v.scope : {};
+  return {
+    scope: {
+      kind: optString(scope.kind),
+      direction: optString(scope.direction),
+      id: optString(scope.id),
+      network: optString(scope.network),
+      declaredType: optString(scope.declared_type),
+    },
+    lastReceivedFeedbackAt: optString(v.last_received_feedback_at),
+    lastEligibleRatingAt: optString(v.last_eligible_rating_at),
+    datedFeedbackCount: num(v.dated_feedback_count),
+    undatedFeedbackCount: num(v.undated_feedback_count),
+    timestampCoverage: optString(v.timestamp_coverage),
+    eligibleDatedCount: num(v.eligible_dated_count),
+    eligibleUndatedCount: num(v.eligible_undated_count),
+    eligibleTimestampCoverage: optString(v.eligible_timestamp_coverage),
+    refreshedAt: optString(v.refreshed_at),
+    indexerCheckedAt: optString(v.indexer_checked_at),
+    freshnessVersion: optString(v.freshness_version),
+  };
 }
 
 function parseSnapshot(v: unknown): Snapshot | null {
@@ -353,6 +391,7 @@ export function parseWalletBreakdown(
     concentration: parseConcentration(payload.concentration),
     confidence: parseConfidence(payload.confidence),
     activity: parseActivity(payload.activity),
+    freshness: parseFreshness(payload.freshness),
     snapshot: parseSnapshot(payload.snapshot),
     payment,
     policyVersion: optString(payload.policy_version),
@@ -446,6 +485,8 @@ export function parseHealth(payload: unknown): IndexHealth {
     orderingPolicy: String(payload.ordering_policy ?? ''),
     raterWeightPolicy: String(payload.rater_weight_policy ?? ''),
     confidencePolicy: String(payload.confidence_policy ?? ''),
+    credibilityM: optNumber(payload.credibility_m),
+    freshness: parseFreshness(payload.freshness),
     confidenceThresholds: isObj(payload.confidence_thresholds)
       ? (payload.confidence_thresholds as Record<string, number>)
       : {},
