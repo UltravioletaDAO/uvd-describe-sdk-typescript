@@ -485,6 +485,8 @@ export function parseHealth(payload: unknown): IndexHealth {
     orderingPolicy: String(payload.ordering_policy ?? ''),
     raterWeightPolicy: String(payload.rater_weight_policy ?? ''),
     confidencePolicy: String(payload.confidence_policy ?? ''),
+    credibilityM: optNumber(payload.credibility_m),
+    freshness: parseFreshness(payload.freshness),
     confidenceThresholds: isObj(payload.confidence_thresholds)
       ? (payload.confidence_thresholds as Record<string, number>)
       : {},

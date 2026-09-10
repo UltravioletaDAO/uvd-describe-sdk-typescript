@@ -528,6 +528,25 @@ export interface IndexHealth {
   orderingPolicy: string;
   raterWeightPolicy: string;
   confidencePolicy: string;
+  /**
+   * The frozen `M` of the per-chain credibility weight, `Z_k = R_k/(R_k+M)`.
+   *
+   * REQUIRED in the server schema since `credibility-weight-per-chain@1`
+   * (2026-09-04) and untyped here until now — `types.schema.test.ts` caught it
+   * the moment the snapshot was refreshed. It ships live because the number is
+   * frozen and versioned: recomputing a `finalScore` by hand needs THIS M, not
+   * a copy of it that went stale.
+   */
+  credibilityM: number | null;
+  /**
+   * WHEN the index as a whole last received a description. The only free,
+   * account-less, parameter-less place to read whether describe.net is still
+   * taking in descriptions or merely still refreshing its views — the two look
+   * identical from the outside, which is the confusion `Freshness` closes.
+   *
+   * `null` against a server that does not publish it yet.
+   */
+  freshness: Freshness | null;
   /** e.g. `{no_ratings: 0, low: 1, medium: 3, high: 6}` — live, never re-typed. */
   confidenceThresholds: Record<string, number>;
   /** e.g. `{min_raters: 3, campaign_per_rater: 20, top_share: 0.5, ...}`. */
