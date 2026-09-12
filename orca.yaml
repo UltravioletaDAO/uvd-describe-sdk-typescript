@@ -1,0 +1,43 @@
+# orca.yaml -- generado por c0der (PM del stack Ultravioleta DAO), 2026-08-31.
+# Deja un worktree nuevo de Orca listo para trabajar: dev-deps del lockfile + dist/ construido.
+
+scripts:
+  # Medido 2026-08-31 en Z:\: `npm ci` 5,6 s en frio y 6,3 s repetido (209 paquetes,
+  # cache npm compartida en ~/.npm) + tsup 7,4 s = ~13 s. Idempotente: npm ci reinstala
+  # exacto al lockfile y tsup corre con clean:true. Cero prompts.
+  # El build va incluido porque `npm run smoke` y el chequeo de imports de CI leen dist/,
+  # y sin el fallan con un error que no dice que lo que falta es construir.
+  setup: npm ci --no-audit --no-fund && npm run build
+  # Cada worktree paga su propio node_modules de 130 MB (ver la nota de sharedDirectories
+  # al final); esto lo devuelve al archivar. `--no` es la guarda de idempotencia: si las
+  # deps ya no estan, falla en el acto en vez de ofrecer instalar rimraf -- npx sin --no
+  # es interactivo, y un setup/archive interactivo cuelga a Orca.
+  archive: npx --no rimraf dist node_modules
+
+# El agente puede leer src/, CLAUDE.md y planear sin node_modules, y el setup son ~13 s.
+setupAgentStartupPolicy: wait-for-setup
+
+defaultTabs:
+  # 199 tests, 13 archivos, 1,6 s, OFFLINE por regla del repo. Es el loop de trabajo.
+  - title: tests
+    color: "#a855f7"
+    command: npm test
+  # El resto del job `validate` de CI. El segundo tsc es el gate documentado en
+  # CLAUDE.md: `npm run typecheck` excluye los *.test.ts, tsconfig.eslint.json no.
+  - title: gate
+    color: "#a855f7"
+    command: npm run typecheck && npx tsc --noEmit -p tsconfig.eslint.json && npm run lint
+  # El unico chequeo que sale a la red: se movio describe.net bajo nuestros tipos?
+  # Verde hoy (20 paths, v2.0.0). Verde de producto porque interroga al servicio, no al SDK.
+  - title: schema drift
+    color: "#22c55e"
+    command: npm run schema:check
+
+# worktree.sharedDirectories: ausente a proposito. Los dos unicos candidatos gitignored
+# que existen hoy son node_modules (130 MB) y dist (864 KB), y los dos se rechazan medidos:
+#   - node_modules: reinstalarlo cuesta 5,6 s, asi que compartirlo no compra tiempo; y
+#     `npm ci` borra node_modules antes de instalar, o sea que se comeria el symlink de
+#     Orca en el primer setup y la comparticion quedaria rota en silencio -- peor que no
+#     declararla, porque parece que ahorra y no ahorra.
+#   - dist: artefacto de build y depende de la rama. Compartirlo hace que dos worktrees se
+#     pisen el dist y que el chequeo "cada entry importa exactamente lo suyo" mienta.
