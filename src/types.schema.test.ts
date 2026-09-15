@@ -169,19 +169,17 @@ describe('the x402 security scheme is still what we implement', () => {
 });
 
 describe('the caveat codes we export are the ones the index can send', () => {
-  it('are nine, kebab-case, and unique — one short of the service, knowingly', () => {
+  it('are ten, kebab-case, and unique — the same set the service serves', () => {
     // The set is frozen upstream in `describenet/caveats.py:177-192` and pinned
     // there by its own test. This asserts our copy has not been edited by hand
     // — an added or renamed code is a contract change, never a typo that slid
     // through. The snapshot cannot check this for us: the schema types `code`
     // as a plain string, which is the whole reason exporting the set is a
     // deliverable of this package.
-    // ⚠️ Eight until 2026-09-15, when `facilitator-authored` was mirrored. The
-    // service serves TEN: `thin-chain` (upstream 2026-09-04) is deliberately NOT
-    // here yet — missing from both twins, reported for a follow-up that adds it
-    // to both at once. See the docstring of `CAVEAT_CODES`.
-    expect(CAVEAT_CODES).toHaveLength(9);
-    expect(new Set(CAVEAT_CODES).size).toBe(9);
+    // ⚠️ Eight until 0.4.0 (`facilitator-authored`), nine until 0.4.1
+    // (`thin-chain`, upstream since 2026-09-04, added to both twins at once).
+    expect(CAVEAT_CODES).toHaveLength(10);
+    expect(new Set(CAVEAT_CODES).size).toBe(10);
     for (const code of CAVEAT_CODES) expect(code).toMatch(/^[a-z]+(-[a-z]+)*$/);
     expect([...CAVEAT_CODES].sort()).toEqual([
       'burn-address',
@@ -192,6 +190,7 @@ describe('the caveat codes we export are the ones the index can send', () => {
       'no-score',
       'self-rated',
       'single-rater',
+      'thin-chain',
       'top-client-share',
     ]);
   });

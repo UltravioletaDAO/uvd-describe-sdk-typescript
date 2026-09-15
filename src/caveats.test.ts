@@ -4,6 +4,7 @@ import {
   AGENT_WITH_AUTHOR_CLASSES,
   WALLET_BREAKDOWN,
   WALLET_DECLARES_NOT_COMPUTED,
+  WALLET_FREE_THIN_CHAIN,
   WALLET_UNRATED_DECLARES_NOT_COMPUTED,
   WALLET_WITH_SCORE,
 } from './__fixtures__/live';
@@ -72,6 +73,40 @@ describe('the code union is open, not closed', () => {
 
   it('knows every code it ships with', () => {
     for (const code of CAVEAT_CODES) expect(isKnownCaveatCode(code)).toBe(true);
+  });
+});
+
+describe('thin-chain — the tenth code, evaluated on the free route too (0.4.1)', () => {
+  it('is a known code', () => {
+    // `false` in 0.4.0, which shipped nine of the ten the service serves.
+    expect(isKnownCaveatCode('thin-chain')).toBe(true);
+  });
+
+  it('arrives on the free route, and every code that answer carries is known', () => {
+    const rep = parseWalletReputation(WALLET_FREE_THIN_CHAIN);
+    expect(rep.caveatScope).toBe('public-data-subset');
+    expect(hasCaveat(rep, 'thin-chain')).toBe(true);
+    expect(rep.caveats.map((c) => c.code)).toEqual(['thin-chain']);
+    for (const c of rep.caveats) expect(isKnownCaveatCode(c.code)).toBe(true);
+  });
+
+  it('the free route evaluates burn-address and thin-chain, and declares the other seven', () => {
+    // Evaluated is not the same as fired: the wallets of 0.4.0's fixtures fire
+    // neither, and neither name is in their declaration either.
+    for (const payload of [WALLET_FREE_THIN_CHAIN, WALLET_DECLARES_NOT_COMPUTED, WALLET_UNRATED_DECLARES_NOT_COMPUTED]) {
+      const declared = parseWalletReputation(payload).caveatsNotComputed ?? [];
+      expect(declared).toEqual(LIVE_NOT_COMPUTED);
+      expect(declared).not.toContain('thin-chain');
+      expect(declared).not.toContain('burn-address');
+    }
+    // Declared + evaluated on the free route + the agent-scope code = the whole set.
+    const union = [...LIVE_NOT_COMPUTED, 'burn-address', 'thin-chain', 'facilitator-authored'].sort();
+    expect([...CAVEAT_CODES].sort()).toEqual(union);
+  });
+
+  it('a free answer with thin-chain is still refused by the gate — for the seven, not for it', () => {
+    const e = refusal(() => requireFullCaveats(parseWalletReputation(WALLET_FREE_THIN_CHAIN)));
+    expect(e.notComputed).toEqual(LIVE_NOT_COMPUTED);
   });
 });
 
