@@ -7,6 +7,23 @@ never by the change that bumps the number.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
+## 0.4.1 — 2026-09-15 (not published yet)
+
+### Added
+
+- **`CAVEAT_CODES` gains `thin-chain`** (ten codes, the same set describe.net
+  serves). Served since 2026-09-04 on the wallet scope, and evaluated on the free
+  route as well: `GET /wallets/{wallet}/chains` evaluates `burn-address` and
+  `thin-chain`, and declares the other seven wallet-scope codes in
+  `caveatsNotComputed`. `isKnownCaveatCode('thin-chain')` is now `true`. The
+  Python twin adds the same literal in its own release.
+
+### Unchanged, on purpose
+
+- Types, parsers, the client and `requireFullCaveats()` behave exactly as in
+  0.4.0. A `thin-chain` caveat already arrived whole; this release only makes it
+  a known code (autocomplete, `switch`, `isKnownCaveatCode`).
+
 ## 0.4.0 — 2026-09-15 (not published yet)
 
 Types what describe.net has served since 2026-09-14 (`describe-net` PR #21,

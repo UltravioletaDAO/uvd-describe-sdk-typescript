@@ -35,10 +35,10 @@
 import type { WalletReputation } from './types';
 
 /**
- * Nine of the ten cuts describe.net serves on 2026-09-15, copied from the frozen
- * set in `describenet/caveats.py:177-192` (describe-net `origin/main` at
- * `01f6c4a`), which its own `tests/test_caveat_codes.py` pins literally, so
- * adding or renaming one over there goes red on purpose.
+ * The ten cuts describe.net serves on 2026-09-15, copied from the frozen set in
+ * `describenet/caveats.py:177-192` (describe-net `origin/main` at `4fd11c0`),
+ * which its own `tests/test_caveat_codes.py` pins literally, so adding or
+ * renaming one over there goes red on purpose. Same order as upstream.
  *
  * What the FREE route evaluates, per the server itself (`caveats.py:513`,
  * `_publicos_evaluados`): `burn-address` always, and `thin-chain` when it has the
@@ -49,14 +49,11 @@ import type { WalletReputation } from './types';
  * free response therefore still means "no public-data caveat", NOT "clean" — and
  * `requireFullCaveats()` is the gate that knows it. See `CAVEAT_SCOPE_FREE`.
  *
- * 🔴 **`thin-chain` is NOT mirrored, and not by oversight.** Upstream since
- * 2026-09-04 (`cf8f806`) and on the free route since 2026-09-05, it is missing
- * from BOTH twins: this version was scoped to `facilitator-authored`, and a code
- * added to one twin only breaks parity in a set both publish. The Python twin
- * (`uvd_describe_sdk/caveats.py`) carries the same nine and says the same thing;
- * the follow-up adds it to both together. Meanwhile
- * `isKnownCaveatCode('thin-chain')` answers `false` — the tolerant answer this
- * module was built to give: the caveat still arrives whole and is shown.
+ * `thin-chain` (upstream since 2026-09-04, `cf8f806`; on the free route since
+ * 2026-09-05) is mirrored since 0.4.1, added to both twins together so the set
+ * both SDKs publish never differs. 0.4.0 shipped nine and knew it: until then
+ * `isKnownCaveatCode('thin-chain')` answered `false`, and the caveat still
+ * arrived whole — the tolerant answer this module was built to give.
  *
  * ⚠️ CORRECTED 2026-09-15, and the old text is left because somebody will look
  * for it. It read: *"The eight cuts served on 2026-08-30, copied from the frozen
@@ -64,7 +61,7 @@ import type { WalletReputation } from './types';
  * are computable from public data, so the free routes serve a documented SUBSET
  * … The other six need the grain and ride the metered routes."* Two codes had
  * landed upstream since and this mirror carried neither; `facilitator-authored`
- * (`6e25d71`, 2026-09-14) is mirrored now, `thin-chain` is not (above). And
+ * (`6e25d71`, 2026-09-14) was mirrored in 0.4.0, `thin-chain` in 0.4.1. And
  * `no-score` is not evaluated on the free route at all: the server declares it
  * in the list.
  */
@@ -89,6 +86,16 @@ export const CAVEAT_CODES = [
    * — which is why they are still served — but the subject is not an identity.
    */
   'burn-address',
+  /**
+   * At least one of two or more scored chains rests on fewer than
+   * `reading_policy.min_raters` distinct raters. Its weight in the global score
+   * is small but never zero, so it still moves the number: read the per-chain
+   * composition before the global. Never fires on a single chain — there the
+   * weight cancels and `single-rater` / `few-raters` already say it. Wallet
+   * scope, and evaluated on the FREE route too (from `chains[]`). Since
+   * 2026-09-04; mirrored since 0.4.1.
+   */
+  'thin-chain',
   /**
    * Some rows of `ratings[]` carry `authorClass: 'facilitator-authored'`: a
    * relayer signed them, so their `client` is not the counterparty and every

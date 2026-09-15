@@ -119,14 +119,13 @@ if (hasCaveat(rep, 'burn-address')) { /* nobody controls this address */ }
 if (hasCaveat(rep, 'few-raters'))   { /* thin evidence */ }
 ```
 
-The nine codes are exported and typed: `no-score`, `concentration-degraded`,
+The ten codes are exported and typed: `no-score`, `concentration-degraded`,
 `single-rater`, `few-raters`, `top-client-share`, `campaign-per-rater`,
-`self-rated`, `burn-address`, `facilitator-authored` (since 0.4.0). The union
-stays **open**, so a code the server adds tomorrow will not be a type error in
-code you already shipped. ⚠️ describe.net serves a tenth, `thin-chain` (since
-2026-09-04, on the free route too), that neither this package nor its Python twin
-mirrors yet: `isKnownCaveatCode('thin-chain')` is `false`, and the caveat still
-arrives whole.
+`self-rated`, `burn-address`, `thin-chain` (since 0.4.1; served since 2026-09-04,
+on the free route too), `facilitator-authored` (since 0.4.0). The union stays
+**open**, so a code the server adds tomorrow will not be a type error in code you
+already shipped: `isKnownCaveatCode()` answers `false` for it, and the caveat
+still arrives whole.
 
 ⚠️ On free routes `caveats: []` means *no **public-data** caveat*, not "clean" —
 the evidence-quality cuts need the grain and ride the metered routes. Check
