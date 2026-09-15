@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { CAVEAT_CODES } from './caveats';
+import { AUTHOR_CLASSES, CAVEAT_CODES } from './caveats';
 import {
   parseAgentReputation,
   parseHealth,
@@ -17,8 +17,9 @@ import {
  *
  * This is the OFFLINE half, and it runs in the normal loop. It reads
  * `schema/openapi.snapshot.json` — a pinned copy of the live schema fetched
- * 2026-08-30 — and asserts that every REQUIRED field of the schemas this SDK
- * wraps has a home in our parsed shape. It answers "did we drift?".
+ * 2026-08-30 (re-fetched for 0.3.0 and again on 2026-09-15 for 0.4.0) — and
+ * asserts that every REQUIRED field of the schemas this SDK wraps has a home in
+ * our parsed shape. It answers "did we drift?".
  *
  * The other half is `npm run schema:check`, which re-fetches the live schema
  * and diffs it against the snapshot. It answers "did THEY move?". Two failures,
@@ -113,6 +114,14 @@ describe('hand-written types cover every required field of the schema', () => {
     assertCovers('AgentScore', parsed);
   });
 
+  it('Rating -> Rating', () => {
+    // Added 2026-09-15. `Rating` was typed since 0.1.0 and never checked here,
+    // so `author_class` becoming a REQUIRED field upstream (2026-09-14) would
+    // have crossed this gate in silence — same hole as in `refresh-schema.mjs`.
+    const [parsed] = parseAgentReputation({ agent_id: '1', ratings: [{ client: '0x1' }] }, null).ratings;
+    assertCovers('Rating', parsed as unknown as Record<string, unknown>);
+  });
+
   it('LeaderboardRow -> LeaderboardRow', () => {
     const [parsed] = parseLeaderboard([{ rank: 1, wallet: '0x1' }]);
     assertCovers('LeaderboardRow', parsed as unknown as Record<string, unknown>);
@@ -160,20 +169,25 @@ describe('the x402 security scheme is still what we implement', () => {
 });
 
 describe('the caveat codes we export are the ones the index can send', () => {
-  it('are eight, kebab-case, and unique', () => {
-    // The set is frozen upstream in `describenet/caveats.py:172-183` and pinned
+  it('are nine, kebab-case, and unique — one short of the service, knowingly', () => {
+    // The set is frozen upstream in `describenet/caveats.py:177-192` and pinned
     // there by its own test. This asserts our copy has not been edited by hand
     // — an added or renamed code is a contract change, never a typo that slid
     // through. The snapshot cannot check this for us: the schema types `code`
     // as a plain string, which is the whole reason exporting the set is a
     // deliverable of this package.
-    expect(CAVEAT_CODES).toHaveLength(8);
-    expect(new Set(CAVEAT_CODES).size).toBe(8);
+    // ⚠️ Eight until 2026-09-15, when `facilitator-authored` was mirrored. The
+    // service serves TEN: `thin-chain` (upstream 2026-09-04) is deliberately NOT
+    // here yet — missing from both twins, reported for a follow-up that adds it
+    // to both at once. See the docstring of `CAVEAT_CODES`.
+    expect(CAVEAT_CODES).toHaveLength(9);
+    expect(new Set(CAVEAT_CODES).size).toBe(9);
     for (const code of CAVEAT_CODES) expect(code).toMatch(/^[a-z]+(-[a-z]+)*$/);
     expect([...CAVEAT_CODES].sort()).toEqual([
       'burn-address',
       'campaign-per-rater',
       'concentration-degraded',
+      'facilitator-authored',
       'few-raters',
       'no-score',
       'self-rated',
@@ -181,11 +195,39 @@ describe('the caveat codes we export are the ones the index can send', () => {
       'top-client-share',
     ]);
   });
+
+  it('every code the free route declares unevaluated is one we export', () => {
+    // The schema cannot list them (it types the entries as plain strings), so
+    // this reads the only machine-readable source there is: the description
+    // names the metered route that DOES evaluate them. What it can pin is the
+    // field itself — a list of strings, required.
+    const field = schema.components.schemas.WalletChains.properties?.caveats_not_computed as {
+      type: string;
+      items: { type: string };
+    };
+    expect(field).toMatchObject({ type: 'array', items: { type: 'string' } });
+    expect(requiredOf('WalletChains')).toContain('caveats_not_computed');
+  });
+});
+
+describe('the author classes we export are the schema enum, exactly', () => {
+  it('match `Rating.author_class.enum` in the snapshot', () => {
+    // Unlike the caveat codes, this one the schema DOES enumerate, so the copy
+    // is pinned against the snapshot itself instead of against a typed list.
+    // The type stays OPEN anyway (see `AuthorClass`): this pins what is known,
+    // it does not forbid what comes next.
+    const field = schema.components.schemas.Rating.properties?.author_class as { enum: string[] };
+    expect([...AUTHOR_CLASSES].sort()).toEqual([...field.enum].sort());
+    expect(requiredOf('Rating')).toContain('author_class');
+  });
 });
 
 describe('the snapshot is the version we wrote these types against', () => {
-  it('is describe.net 2.0.0 with 20 paths', () => {
+  it('is describe.net 2.0.0 with 22 paths', () => {
+    // 20 until the refresh of 2026-09-15, which added two FREE routes this SDK
+    // does not wrap (`GET /categories`, `GET /wallets/{wallet}/exists`) and the
+    // two fields 0.4.0 types. `info.version` did not move: both are additive.
     expect(schema.info.version).toBe('2.0.0');
-    expect(Object.keys(schema.paths)).toHaveLength(20);
+    expect(Object.keys(schema.paths)).toHaveLength(22);
   });
 });

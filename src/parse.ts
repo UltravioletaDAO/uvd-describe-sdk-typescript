@@ -131,6 +131,39 @@ function parseCaveats(v: unknown): Caveat[] {
   return out;
 }
 
+/**
+ * `caveats_not_computed` → the declared list, or `null` when nothing readable
+ * was declared. Added 2026-09-15 (0.4.0).
+ *
+ * `null` and `[]` are different facts and this function exists to keep them
+ * apart: `[]` is a DECLARATION ("evaluated everything") and the one value that
+ * makes `requireFullCaveats()` pass; `null` is a server that did not declare
+ * (older than 2026-09-14) or a stored payload from before then. A `?? []` here
+ * would turn every undeclared answer into a pass.
+ *
+ * 🔴 **A declaration that cannot be read WHOLE is not a declaration**, so every
+ * shape that is not a list of non-empty strings is `null` — never a filtered
+ * list. The asymmetry with `parseCaveats`, which drops a bad entry and keeps the
+ * rest, is deliberate: there a dropped entry loses one warning; here it can turn
+ * `[null]` into `[]`, the value that opens the gate. Failing closed means reading
+ * garbage as "undeclared", which the gate refuses. That covers the bare count
+ * floated on 2026-08-31 and rejected upstream for a list, too.
+ *
+ * It never throws: the field is a footnote to a read that otherwise arrived
+ * fine, and on a free route a throw becomes the fail-open `null` — the whole
+ * reputation lost over its footnote. Same rule, same shapes, as the Python twin's
+ * `models.py::_parse_not_computed`.
+ */
+function parseNotComputed(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const codes: string[] = [];
+  for (const item of v) {
+    if (typeof item !== 'string' || item === '') return null;
+    codes.push(item);
+  }
+  return codes;
+}
+
 function parseFacets(v: unknown): Record<string, Facet> {
   if (!isObj(v)) return {};
   const out: Record<string, Facet> = {};
@@ -267,6 +300,13 @@ function parseRatings(v: unknown): Rating[] {
     const malformed: string[] = [];
     return {
       client: String(r.client ?? ''),
+      // Tolerant on purpose, the `isKnownCaveatCode` pattern: a class this SDK
+      // has not heard of arrives verbatim, never thrown (one advisory field
+      // must not destroy a paid read) and never nulled (dropping it would read
+      // as "no class served"). Only a non-string or an empty string is `null`:
+      // there is nothing to keep (the Python twin's `_author_class`, same rule).
+      authorClass:
+        typeof r.author_class === 'string' && r.author_class !== '' ? r.author_class : null,
       feedbackIndex: num(r.feedback_index),
       value: num(r.value),
       valueDecimals: num(r.value_decimals),
@@ -344,6 +384,8 @@ export function parseWalletReputation(payload: unknown): WalletReputation {
     chainsWithIdentity: num(payload.chains_with_identity),
     chainsWithReputation: num(payload.chains_with_reputation),
     totalReviews: num(payload.total_reviews),
+    // `null` when absent or unreadable — NEVER `[]`. See `parseNotComputed`.
+    caveatsNotComputed: parseNotComputed(payload.caveats_not_computed),
     policyVersion: optString(payload.policy_version),
     caveats: parseCaveats(payload.caveats),
     caveatScope: CAVEAT_SCOPE_FREE,

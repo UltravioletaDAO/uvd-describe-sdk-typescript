@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **227 tests in ~1,3 s** (re-measured 2026-09-15 for 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
@@ -53,7 +53,8 @@ pay, deliberately.
    (public)    (fetch,      │     (wire→typed)   (hand-written + schema gate)
                 failOpen,   ├──> errors.ts   (the taxonomy + failOpenCovers)
                             │     └──> recovery.ts (what to do INSTEAD, literals only)
-                402 flow,   ├──> caveats.ts  (the 8 frozen codes)
+                402 flow,   ├──> caveats.ts  (the caveat codes, author classes,
+                            │                 requireFullCaveats)
                 jitter)     ├──> format.ts   (R8: 83.0 -> "83")
                             ├──> jitter.ts   (the sleep before every request)
                             ├──> hashes.ts   (is this shaped like a hash?)
@@ -74,7 +75,7 @@ pay, deliberately.
 | `config.ts` | Every calibrable number and the pinned treasury. Nothing else re-types them |
 | `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only) and the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`) |
 | `recovery.ts` | **What to do INSTEAD** — one frozen sentence per `kind` (Execution Market's contribution, 2026-08-30). Nothing but literals: no call site builds a recovery out of a message, a URL or a `cause`, and that IS the redaction guard. `timeout` is `null` and its entry defends why |
-| `caveats.ts` | The eight codes, as an exported contract. Open union, never closed |
+| `caveats.ts` | The caveat codes as an exported contract — nine since 2026-09-15 (it said "the eight" until `facilitator-authored` was mirrored; `thin-chain`, served since 2026-09-04, is knowingly missing from BOTH twins until one follow-up adds it to both). Open union, never closed. Since 0.4.0 also the author classes of `Rating.authorClass` (open the same way), `requireFullCaveats()` — the gate that reads `caveatsNotComputed` and fails closed on its absence — and its `CaveatsNotComputedError`, which is deliberately NOT a `DescribeError` |
 | `format.ts` | How a score is written down. Two functions, no state |
 | `jitter.ts` | The draw and the only `setTimeout` in the package. Pure `(maxMs, random) → ms`, so its bounds are tested without a clock. KarmaKadabra's 0,4 s, `Math.random` and **never** a CSPRNG |
 | `hashes.ts` | Whether a string is shaped like an on-chain id — the UNION of EVM hex, Solana base58 and a bare digest, plus the receipt's `pending`. Also the rule about which fields are NOT checked (`build_sha`) and why |
@@ -199,6 +200,23 @@ pay, deliberately.
    the 317 hours one level up. What did NOT cross over: EM's ten codes, which
    are their API's vocabulary (escrow, payouts) and would be dead branches here.
 
+12. **An undeclared `caveatsNotComputed` is `null`, never `[]` — and the gate
+   fails closed on it.** Added 2026-09-15 (0.4.0) from karma-hello's finding (a
+   quality gate on the free route passes everybody, because the cuts it checks
+   never ran) and describe.net's answer of 2026-09-14 (`caveats_not_computed`).
+   `[]` is a DECLARATION ("evaluated everything") and the only value that passes
+   `requireFullCaveats()`; `null` — a server or a stored payload that did not
+   declare, or a declaration that cannot be read WHOLE — REFUSES with
+   `notComputed: null` (`describe-net/docs/BACKLOG.md:221`: the scope was always
+   the signal). A `?? []` or a filtered list in `parse.ts`, or a `return` on the
+   undeclared branch, turns garbage or a pre-2026-09-14 payload into a pass — the
+   mutations are named in `caveats.test.ts` and all go red. 🔴 The refusal,
+   `CaveatsNotComputedError`, is **not** a `DescribeError`: a consumer's `catch`
+   that fails open on `DescribeError` must not be able to read it as "describe is
+   down" and let the subject through. Same rule one field over:
+   `Rating.authorClass` absent is `null`, never `rater-authored`, and a class this
+   SDK has not heard of arrives verbatim — never thrown, never nulled.
+
 ## Measured traps
 
 **`Boolean([])` is `true` in JavaScript.** describe.net's free routes carry
@@ -290,6 +308,8 @@ WEIRDEST legitimate value looks like — not what its normal one does.
   evidence in the body and the trailer
   `Co-Authored-By: Claude <noreply@anthropic.com>`.
 - **Never `git add -A`** — stage by file.
+- **A version bump gets its `CHANGELOG.md` entry** (the file starts at 0.4.0),
+  and never a tag: publishing is a `vX.Y.Z` tag, pushed by whoever releases.
 - **Never hardcode a private key**, not even in an example. `process.env` only.
 - A test that proves nothing unless it can go red is not a test: mount the bad
   state and confirm. Several tests here are named `MOUNTS THE BAD STATE` and

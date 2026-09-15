@@ -3,7 +3,7 @@
  "info": {
   "title": "describe.net",
   "summary": "Global reputation for humans, AI agents and robots — on every chain we read",
-  "description": "## A score without its raters is a rumor.\n\n**describe.net decomposes any ERC-8004 reputation into the counterparties that wrote it: how many they are, how many times each one spoke, on what, and when.**\n\nBuilt for agents that have to vet a counterparty before they sign — one HTTP call instead of hours of archive RPC across chains. No account, no API key, no token: the free tier answers without headers, and the metered tier is paid per call with x402 over USDC. **Payment is the authentication.**\n\n**How big is the index? Ask it: `GET /health`** — agents, individual ratings and how far the scan reached on each chain, live, free and uncached. The numbers are not repeated on this page on purpose: indexing runs continuously, and a total typed into a document is a total that goes stale while still sounding exact.\n\nScoring policy `credibility-weight-per-chain@1` · ranking `bayes-shrinkage-two-level@3` · published rater weighting `one-voice-per-counterparty+bounded-trust@1` · evidence bands `wilson-raters@1`. Every scored response carries its `policy_version`: two callers can never be served different numbers.\n\n### Rate limits\n\nThrottling happens at the edge (API Gateway), per stage: **50 requests/second sustained, bursts up to 40**. Above that the gateway answers **HTTP 429** before the request reaches the application — back off and retry; a second of pause clears the bucket. Every response carries the policy as a header, `RateLimit-Policy: 50;w=1;burst=40` (RFC 9239 syntax: 50 requests per 1-second window), and **that header is the authority** — it is read from the gateway's own configuration, so it stays right across a change that this page has not been rebuilt for. A per-request `RateLimit` counter (remaining/reset) is **not** emitted on purpose: the application does not see the gateway's budget, and a fabricated counter is worse than none. Cached free routes (`/health`, `/pricing`, `/leaderboard`, `/stats/*`) are served by CloudFront and do not consume the budget on a cache hit.\n\n### Versioning & deprecation\n\nThe API is versioned by this document's `info.version` (semver), not by URL paths — there is no `/v1/`; every route is the current contract. **A breaking change to a served field bumps the major version and ships with a new `API_VERSION`, never silently**: that is the standing rule this repo already applies (a field changing *type* counts as breaking, a new optional field does not). Scored numbers are versioned separately and per-response via `policy_version` — if the scoring policy changes, that string changes with it, so any cached or stored number can be traced to the policy that produced it. Deprecations are announced in this description and in [llms.txt](https://describe.net/llms.txt) before removal; there is no fixed sunset window to cite yet, and this page will say so when one exists rather than inventing one here.\n\n### Features\n\n| Feature | What it means |\n|---|---|\n| Cross-chain ERC-8004 index | One row per individual rating, scanned from `Registered` and `NewFeedback` logs and joined to the agent's **current** owner — never the minter, which is usually the facilitator that minted the id before transferring it. |\n| Credibility weight per chain | A wallet's score is the credibility-weighted mean of its per-chain scores: each chain votes with `distinct_raters / (distinct_raters + M)`, so a chain carrying hundreds of thousands of ratings cannot drown one carrying forty people, and one rater on a spare chain weighs 0.174 — never half the wallet. Inherited from DescribeMe's Bayesian ranking. The per-chain detail ships in `per_chain` with each chain's raters and weight, never collapsed. |\n| Bayesian shrinkage in the ranking | The leaderboard is ordered by `shrunk_score` — the observed mean pulled toward the index prior by how many **distinct raters** back it. Both numbers and that N travel in every row, so the order can be recomputed by hand instead of believed. |\n| Self-ratings excluded, not hidden | A subject rating itself is out of every score and published separately as `self_rated`, with `gap = self - others`. Positive means it overrates itself. |\n| Facets by tag | The rater's `tag1` kept apart — `trust`, `liveness`, `contractRisk`, `activity` are separate judgements, not a mean. The overall score and one facet can disagree by more than 30 points on the same wallet; that gap is the product. |\n| Concentration signal | `distinct_raters`, `top_client_share` and `top_client` on every profile. Advisory — it never moves a score. Read `distinct_raters` against `total_reviews`: the largest campaign in this index sits **under 0.15 on share**, so any threshold on share alone waves it through. What gives it away is thousands of ratings per distinct rater. Verify the campaign for free — `miner-vouch` in `GET /stats/facets` carries over 310,000 ratings with `distinct_agents: 1`, against the index total in `GET /health`. |\n| Provenance per rating | Agent detail returns every rating with its `tx_hash`, block number and log index — revoked ones included, with the transaction that killed them. A revocation nobody can audit is not a revocation. |\n| Time series on on-chain time | History buckets by the **block** timestamp, never by when we indexed the row, and reports `coverage.undated_reviews` so a series shorter than the score reads as coverage rather than as a bug. |\n| Second weighting published alongside | `weighted_score` and `rater_weight_policy` travel next to `final_score`. Changing how hundreds of thousands of ratings are weighted is not something a reputation index gets to do silently. |\n| Citable snapshot | `?snapshot=true` persists a durable row with `inputs_digest` + `policy_version`: a receipt you can hand a counterparty and we can recompute identically. |\n| MCP server | The same index as thirteen tools inside your MCP client: five are priced like the routes behind them, the other eight never charge. |\n\n### Pricing\n\nOne rule decides the line, and it is a rule about cost: **free is what a cache serves everybody; charged is what only you asked for.** The aggregate view of the index is free forever. The question about *your* counterparty is what costs money, which is exactly when the answer is worth something.\n\n**Free — HTTP 200, no headers, no account.** Start here: reading the free tier costs nothing and tells you whether the metered tier is worth it.\n\n| Route | What it gives you |\n|---|---|\n| `GET /health` | Liveness, plus how far the scan reached on each chain and the four policy versions in force. |\n| `GET /pricing` | Every price, machine-readable, each with the reason it costs that. The only route that never touches Postgres. |\n| `GET /docs` · `/redoc` · `/openapi.json` | **The live schema** — what this build is serving at this instant, rendered two ways. The written documentation (a guide for every door, plus this schema sealed with its date so you can cite it) is at [docs.describe.net](https://docs.describe.net/). |\n| `/a2a/?` | — |\n| `/mcp/?` | — |\n| `/api/?` | — |\n| `/\\.well-known/.*` | — |\n| `/workflows\\.json` | — |\n| `/manifesto/?` | — |\n| `/wallets/[^/]+/chains/?` | — |\n| `/badge/.+` | — |\n| `/search(/.*)?` | — |\n| `/chains(/[A-Za-z0-9_-]+)?/?` | — |\n| `/feed/?` | — |\n| `GET /leaderboard` | The first 100 rows, no parameters — the shop window. Ranked by evidence, not by bare average. |\n| `GET /stats/facets` | Every facet in the index with its volume, mean and how many distinct agents carry it. |\n| `GET /stats/types` | Declared-type coverage across indexed agents, including how many declared none. **The heaviest aggregate in the index** — it used to exceed the gateway timeout, and since 2026-08-11 it is served from a materialised snapshot instead of the live grain. For the same grain cut by tag use `GET /stats/facets`. |\n| `GET /stats/issuers` | Every issuing service (the host of each rating's `feedbackURI`) with its volume and reach — and the route that audits how much of this index its own operators wrote (`issuer_org`). |\n\n**Metered — HTTP 402 until paid.** These answer a question about one named subject.\n\n| Route | Price | What it gives you |\n|---|---|---|\n| `/reputation/rater/[^/]+/?` | $0.01 | — |\n| `GET /leaderboard/page` | $0.01 | Paging past the shop window, widening it (`limit` up to 500), or filtering by declared type. Every call is metered. |\n| `GET /reputation/wallet/{wallet}` | $0.01 | The composition: per-chain scores, facets, self-rating gap, concentration, first and last rating. |\n| `GET /reputation/agent/{network}/{agent_id}` | $0.02 | One agent and EVERY rating it received, each with its transaction — revoked ones included. |\n| `GET /reputation/wallet/{wallet}/history` | $0.03 | The series by on-chain time, weekly or monthly, with the coverage it could actually plot. |\n| `GET /reputation/wallet/{wallet}?snapshot=true` | $0.05 | The only route that WRITES. Records a durable receipt row with `inputs_digest` + `policy_version` you can cite to a counterparty. |\n\nPricing table `cost-tiered@6`, served machine-readable and free at `GET /pricing`, each price with the reason it costs that. **The authoritative price for one call is the `accepts[]` array of that call's own 402** — the price can depend on the parameters, which a table per route cannot express.\n\n### How to pay\n\nFive steps, no registration, nothing to do before your first call. If you can sign an EIP-3009 authorization you are already a customer.\n\n1. **Call the route you want. Do not pre-authorize.** Asking without paying is free and is the intended first move — the 402 is a price quote, not an error.\n2. **Read the challenge.** The 402 body carries `amount`, `resource`, `recipient`, the pricing tier with its reason, and `accepts[]` — one entry per network. **`accepts[]` is the only thing you sign against.** Its `amount` is in token base units (USDC has 6 decimals, so `\"10000\"` is $0.01); the top-level `amount` is the human dollar figure and must not be signed. Take the USDC contract from `accepts[].asset`, never from a document.\n3. **Check who you are about to pay, every time.** The only address describe.net will ever ask you to pay is `0xe4dc963c56979E0260fc146b87eE24F18220e545`, published here and pinned out of band in the MCP server and in `auth.md`. If `payTo` differs, **do not pay** — either the challenge did not come from us, or the treasury changed and this page is stale. Both are resolved by asking, not by signing.\n4. **Sign an EIP-3009 `TransferWithAuthorization`** for that `amount`, to that `payTo`, for that `asset`, on that network, and base64-encode the x402 payload. You sign locally and send a signature — no private key ever leaves your side. An MCP wallet (`ows_sign_eip3009`, `pay_x402`) or `uvd-x402-sdk` will produce the string for you.\n5. **Replay the identical request with the `X-PAYMENT` header.** Same method, same path, same query string, one header more. Payment is verified and settled on-chain **before** the query runs; the 200 comes back with `X-Payment-Receipt` (the settlement transaction hash — public, keep it to reconcile) and `X-Payment-Reused`.\n\nNetworks the challenge will offer, chosen by settlement gas rather than by price — we pay the gas, and paying L1 gas to collect one cent would be selling at a loss:\n\n| Network | Chain ID |\n|---|---|\n| `base` | 8453 |\n| `avalanche` | 43114 |\n| `arbitrum` | 42161 |\n| `optimism` | 10 |\n| `polygon` | 137 |\n| `celo` | 42220 |\n\n**Three rules that save money.** One authorization per paid call: the nonce is consumed at settlement, so a credential that already paid will not pay again. A receipt is reusable, but only for the byte-identical resource — wallet A's receipt cannot unlock wallet B, and the reused read answers `X-Payment-Reused: true`. And **a 503 is not a 402**: `facilitator_unavailable` means your authorization was NOT used, so retry the same request with the *same* `X-PAYMENT` after `Retry-After` — signing a fresh one there can make you pay twice. Full flow, with worked examples: https://describe.net/auth.md\n\n### What we do NOT do\n\n| Not this | Why it matters to you |\n|---|---|\n| Not a block explorer | No balances, no transactions, no contract state. We serve the ratings; each one carries its `tx_hash` so you can go verify it in an explorer, which is the point. |\n| Not a price oracle | No token prices, no TVL, no market data. The only dollar figures here are our own prices. |\n| Not a credit score | Nothing here predicts default and nothing here is an approval. We report who rated a subject, how many of them there were, on what, and when. The decision stays yours — and a single number was never enough to make it. |\n| Not a writer to any chain | Zero contracts deployed, zero transactions signed by us. This is a read-only index; the only thing that moves on-chain is your own payment, settled by the facilitator. |\n| Not an identity service | A wallet is a wallet. There is no name lookup and no person search, and no amount of on-chain behaviour makes us call a subject a person. |\n\n### Links\n\n**The documentation lives at [docs.describe.net](https://docs.describe.net/)** — a guide for every door, and this schema sealed with its date and provenance so a link to it still means the same thing next month. The pages below on `api.describe.net` are the **live schema**: the same document, rendered from the build that is answering you right now. Read the hub; check the live pages when what you need to know is what is deployed at this instant.\n\n| Resource | URL |\n|---|---|\n| Documentation (canonical) | https://docs.describe.net/ |\n| Site | https://describe.net |\n| Swagger UI — live schema (this page) | https://api.describe.net/docs |\n| ReDoc — live schema | https://api.describe.net/redoc |\n| OpenAPI 3.1 schema (live) | https://api.describe.net/openapi.json |\n| OpenAPI 3.1 schema (sealed, citable) | https://docs.describe.net/openapi.json |\n| llms.txt | https://describe.net/llms.txt |\n| Agent skill (umbrella) | https://describe.net/skill.md |\n| Agent workflows | https://describe.net/workflows.md |\n| Agent skills index | https://describe.net/.well-known/agent-skills/index.json |\n| API catalog (RFC 9727 linkset) | https://describe.net/.well-known/api-catalog |\n| How to authenticate — i.e. how to pay | https://describe.net/auth.md |\n| API guide | https://describe.net/api.md |\n| MCP server card | https://describe.net/.well-known/mcp/server-card.json |\n| Live prices | https://api.describe.net/pricing |\n| Live index coverage | https://api.describe.net/health |",
+  "description": "## A score without its raters is a rumor.\n\n**describe.net decomposes any ERC-8004 reputation into the counterparties that wrote it: how many they are, how many times each one spoke, on what, and when.**\n\nBuilt for agents that have to vet a counterparty before they sign — one HTTP call instead of hours of archive RPC across chains. No account, no API key, no token: the free tier answers without headers, and the metered tier is paid per call with x402 over USDC. **Payment is the authentication.**\n\n**How big is the index? Ask it: `GET /health`** — agents, individual ratings and how far the scan reached on each chain, live, free and uncached. The numbers are not repeated on this page on purpose: indexing runs continuously, and a total typed into a document is a total that goes stale while still sounding exact.\n\nScoring policy `credibility-weight-per-chain@1` · ranking `bayes-shrinkage-two-level@3` · published rater weighting `one-voice-per-counterparty+bounded-trust@1` · evidence bands `wilson-raters@1`. Every scored response carries its `policy_version`: two callers can never be served different numbers.\n\n### Rate limits\n\nThrottling happens at the edge (API Gateway), per route key — this is the default for every route that has none of its own: **50 requests/second sustained, bursts up to 40**. Above that the gateway answers **HTTP 429** before the request reaches the application — back off and retry; a second of pause clears the bucket. Every response carries the policy **of the route that answered it** as a header — for a route on this default, `RateLimit-Policy: 50;w=1;burst=40` (RFC 9239 syntax: 50 requests per 1-second window), and **that header is the authority** — it is read from the gateway's own configuration, so it stays right across a change that this page has not been rebuilt for. A per-request `RateLimit` counter (remaining/reset) is **not** emitted on purpose: the application does not see the gateway's budget, and a fabricated counter is worse than none. Cached free routes (`/health`, `/pricing`, `/leaderboard`, `/stats/*`) are served by CloudFront and do not consume the budget on a cache hit.\n\n**`GET /wallets/{wallet}/exists` has its own, lower budget: 10 requests/second sustained, bursts up to 20** (also under `/v1`). It is the free door for checking many wallets, and a separate budget keeps a sweep from spending the one paying callers use. Its responses carry `RateLimit-Policy: 10;w=1;burst=20`. It applies to each of its route keys — `GET` and `HEAD`, with and without `/v1` — and whether the gateway counts those four as one bucket or as four has not been measured on the deployed stage yet. Only the trailing-slash form (`/exists/`, which redirects) falls back to the general budget.\n\n### Versioning & deprecation\n\nThe API is versioned by this document's `info.version` (semver), not by URL paths. The `/v1` prefix is an alias of the very same contract, not a second version of it; every route is the current contract. **A breaking change to a served field bumps the major version and ships with a new `API_VERSION`, never silently**: that is the standing rule this repo already applies (a field changing *type* counts as breaking, a new optional field does not). Scored numbers are versioned separately and per-response via `policy_version` — if the scoring policy changes, that string changes with it, so any cached or stored number can be traced to the policy that produced it. Deprecations are announced in this description and in [llms.txt](https://describe.net/llms.txt) before removal; there is no fixed sunset window to cite yet, and this page will say so when one exists rather than inventing one here.\n\n### Features\n\n| Feature | What it means |\n|---|---|\n| Cross-chain ERC-8004 index | One row per individual rating, scanned from `Registered` and `NewFeedback` logs and joined to the agent's **current** owner — never the minter, which is usually the facilitator that minted the id before transferring it. |\n| Credibility weight per chain | A wallet's score is the credibility-weighted mean of its per-chain scores: each chain votes with `distinct_raters / (distinct_raters + M)`, so a chain carrying hundreds of thousands of ratings cannot drown one carrying forty people, and one rater on a spare chain weighs 0.174 — never half the wallet. Inherited from DescribeMe's Bayesian ranking. The per-chain detail ships in `per_chain` with each chain's raters and weight, never collapsed. |\n| Bayesian shrinkage in the ranking | The leaderboard is ordered by `shrunk_score` — the observed mean pulled toward the index prior by how many **distinct raters** back it. Both numbers and that N travel in every row, so the order can be recomputed by hand instead of believed. |\n| Self-ratings excluded, not hidden | A subject rating itself is out of every score and published separately as `self_rated`, with `gap = self - others`. Positive means it overrates itself. |\n| Facets by tag | The rater's `tag1` kept apart — `trust`, `liveness`, `contractRisk`, `activity` are separate judgements, not a mean. The overall score and one facet can disagree by more than 30 points on the same wallet; that gap is the product. |\n| Concentration signal | `distinct_raters`, `top_client_share` and `top_client` on every profile. Advisory — it never moves a score. Read `distinct_raters` against `total_reviews`: the largest campaign in this index sits **under 0.15 on share**, so any threshold on share alone waves it through. What gives it away is thousands of ratings per distinct rater. Verify the campaign for free — `miner-vouch` in `GET /stats/facets` carries over 310,000 ratings with `distinct_agents: 1`, against the index total in `GET /health`. |\n| Provenance per rating | Agent detail returns every rating with its `tx_hash`, block number and log index — revoked ones included, with the transaction that killed them. A revocation nobody can audit is not a revocation. |\n| Time series on on-chain time | History buckets by the **block** timestamp, never by when we indexed the row, and reports `coverage.undated_reviews` so a series shorter than the score reads as coverage rather than as a bug. |\n| Second weighting published alongside | `weighted_score` and `rater_weight_policy` travel next to `final_score`. Changing how hundreds of thousands of ratings are weighted is not something a reputation index gets to do silently. |\n| Citable snapshot | `?snapshot=true` persists a durable row with `inputs_digest` + `policy_version`: a receipt you can hand a counterparty and we can recompute identically. |\n| MCP server | The same index as thirteen tools inside your MCP client: five are priced like the routes behind them, the other eight never charge. |\n\n### Pricing\n\nOne rule decides the line, and it is a rule about cost: **free is what a cache serves everybody; charged is what only you asked for.** The aggregate view of the index is free forever. The question about *your* counterparty is what costs money, which is exactly when the answer is worth something.\n\n**Free — HTTP 200, no headers, no account.** Start here: reading the free tier costs nothing and tells you whether the metered tier is worth it.\n\n| Route | What it gives you |\n|---|---|\n| `GET /health` | Liveness, plus how far the scan reached on each chain and the four policy versions in force. |\n| `GET /pricing` | Every price, machine-readable, each with the reason it costs that. The only route that never touches Postgres. |\n| `GET /docs` · `/redoc` · `/openapi.json` | **The live schema** — what this build is serving at this instant, rendered two ways. The written documentation (a guide for every door, plus this schema sealed with its date so you can cite it) is at [docs.describe.net](https://docs.describe.net/). |\n| `/a2a/?` | — |\n| `/mcp/?` | — |\n| `/api/?` | — |\n| `/\\.well-known/.*` | — |\n| `/workflows\\.json` | — |\n| `/(auth|me)(/.*)?` | — |\n| `/manifesto/?` | — |\n| `/wallets/[^/]+/chains/?` | — |\n| `/wallets/[^/]+/exists/?` | — |\n| `/badge/.+` | — |\n| `/search(/.*)?` | — |\n| `/chains(/[A-Za-z0-9_-]+)?/?` | — |\n| `/feed/?` | — |\n| `GET /leaderboard` | The first 100 rows, no parameters — the shop window. Ranked by evidence, not by bare average. |\n| `GET /stats/facets` | Every facet in the index with its volume, mean and how many distinct agents carry it. |\n| `GET /stats/types` | Declared-type coverage across indexed agents, including how many declared none. **The heaviest aggregate in the index** — it used to exceed the gateway timeout, and since 2026-08-11 it is served from a materialised snapshot instead of the live grain. For the same grain cut by tag use `GET /stats/facets`. |\n| `GET /stats/issuers` | Every issuing service (the host of each rating's `feedbackURI`) with its volume and reach — and the route that audits how much of this index its own operators wrote (`issuer_org`). |\n| `GET /categories` | The directory's catalog: the few categories that can already be pointed at in the index, with labels in English and Spanish, the offer measured live and the share of the index that carries a category at all. Alphabetical — the order is never sold. |\n\n**Metered — HTTP 402 until paid.** These answer a question about one named subject.\n\n| Route | Price | What it gives you |\n|---|---|---|\n| `/reputation/rater/[^/]+/?` | $0.01 | — |\n| `GET /leaderboard/page` | $0.01 | Paging past the shop window, widening it (`limit` up to 500), or filtering by declared type. Every call is metered. |\n| `GET /reputation/wallet/{wallet}` | $0.01 | The composition: per-chain scores, facets, self-rating gap, concentration, first and last rating. |\n| `GET /reputation/agent/{network}/{agent_id}` | $0.02 | One agent and EVERY rating it received, each with its transaction — revoked ones included. |\n| `GET /reputation/wallet/{wallet}/history` | $0.03 | The series by on-chain time, weekly or monthly, with the coverage it could actually plot. |\n| `GET /reputation/wallet/{wallet}?snapshot=true` | $0.05 | The only route that WRITES. Records a durable receipt row with `inputs_digest` + `policy_version` you can cite to a counterparty. |\n\nPricing table `cost-tiered@9`, served machine-readable and free at `GET /pricing`, each price with the reason it costs that. **The authoritative price for one call is the `accepts[]` array of that call's own 402** — the price can depend on the parameters, which a table per route cannot express.\n\n### How to pay\n\nFive steps, no registration, nothing to do before your first call. If you can sign an EIP-3009 authorization you are already a customer.\n\n1. **Call the route you want. Do not pre-authorize.** Asking without paying is free and is the intended first move — the 402 is a price quote, not an error.\n2. **Read the challenge.** The 402 body carries `amount`, `resource`, `recipient`, the pricing tier with its reason, and `accepts[]` — one entry per network. **`accepts[]` is the only thing you sign against.** Its `amount` is in token base units (USDC has 6 decimals, so `\"10000\"` is $0.01); the top-level `amount` is the human dollar figure and must not be signed. Take the USDC contract from `accepts[].asset`, never from a document.\n3. **Check who you are about to pay, every time.** The only address describe.net will ever ask you to pay is `0xe4dc963c56979E0260fc146b87eE24F18220e545`, published here and pinned out of band in the MCP server and in `auth.md`. If `payTo` differs, **do not pay** — either the challenge did not come from us, or the treasury changed and this page is stale. Both are resolved by asking, not by signing.\n4. **Sign an EIP-3009 `TransferWithAuthorization`** for that `amount`, to that `payTo`, for that `asset`, on that network, and base64-encode the x402 payload. You sign locally and send a signature — no private key ever leaves your side. An MCP wallet (`ows_sign_eip3009`, `pay_x402`) or `uvd-x402-sdk` will produce the string for you.\n5. **Replay the identical request with the `X-PAYMENT` header.** Same method, same path, same query string, one header more. Payment is verified and settled on-chain **before** the query runs; the 200 comes back with `X-Payment-Receipt` (the settlement transaction hash — public, keep it to reconcile) and `X-Payment-Reused`.\n\nNetworks the challenge will offer, chosen by settlement gas rather than by price — we pay the gas, and paying L1 gas to collect one cent would be selling at a loss:\n\n| Network | Chain ID |\n|---|---|\n| `base` | 8453 |\n| `avalanche` | 43114 |\n| `arbitrum` | 42161 |\n| `optimism` | 10 |\n| `polygon` | 137 |\n| `celo` | 42220 |\n\n**Three rules that save money.** One authorization per paid call: the nonce is consumed at settlement, so a credential that already paid will not pay again. A receipt is reusable, but only for the byte-identical resource — wallet A's receipt cannot unlock wallet B, and the reused read answers `X-Payment-Reused: true`. And **a 503 is not a 402**: `facilitator_unavailable` means your authorization was NOT used, so retry the same request with the *same* `X-PAYMENT` after `Retry-After` — signing a fresh one there can make you pay twice. Full flow, with worked examples: https://describe.net/auth.md\n\n### What we do NOT do\n\n| Not this | Why it matters to you |\n|---|---|\n| Not a block explorer | No balances, no transactions, no contract state. We serve the ratings; each one carries its `tx_hash` so you can go verify it in an explorer, which is the point. |\n| Not a price oracle | No token prices, no TVL, no market data. The only dollar figures here are our own prices. |\n| Not a credit score | Nothing here predicts default and nothing here is an approval. We report who rated a subject, how many of them there were, on what, and when. The decision stays yours — and a single number was never enough to make it. |\n| Not a writer to any chain | Zero contracts deployed, zero transactions signed by us. This is a read-only index; the only thing that moves on-chain is your own payment, settled by the facilitator. |\n| Not an identity service | A wallet is a wallet. There is no name lookup and no person search, and no amount of on-chain behaviour makes us call a subject a person. |\n\n### Links\n\n**The documentation lives at [docs.describe.net](https://docs.describe.net/)** — a guide for every door, and this schema sealed with its date and provenance so a link to it still means the same thing next month. The pages below on `api.describe.net` are the **live schema**: the same document, rendered from the build that is answering you right now. Read the hub; check the live pages when what you need to know is what is deployed at this instant.\n\n| Resource | URL |\n|---|---|\n| Documentation (canonical) | https://docs.describe.net/ |\n| Site | https://describe.net |\n| Swagger UI — live schema (this page) | https://api.describe.net/docs |\n| ReDoc — live schema | https://api.describe.net/redoc |\n| OpenAPI 3.1 schema (live) | https://api.describe.net/openapi.json |\n| OpenAPI 3.1 schema (sealed, citable) | https://docs.describe.net/openapi.json |\n| llms.txt | https://describe.net/llms.txt |\n| Agent skill (umbrella) | https://describe.net/skill.md |\n| Agent workflows | https://describe.net/workflows.md |\n| Agent skills index | https://describe.net/.well-known/agent-skills/index.json |\n| API catalog (RFC 9727 linkset) | https://describe.net/.well-known/api-catalog |\n| How to authenticate — i.e. how to pay | https://describe.net/auth.md |\n| API guide | https://describe.net/api.md |\n| MCP server card | https://describe.net/.well-known/mcp/server-card.json |\n| Live prices | https://api.describe.net/pricing |\n| Live index coverage | https://api.describe.net/health |",
   "contact": {
    "name": "describe.net",
    "url": "https://describe.net/"
@@ -18,14 +18,27 @@
    "changelog": "https://describe.net/api.md"
   },
   "x-rate-limit-policy": {
-   "enforced_at": "API Gateway (edge), per stage",
+   "enforced_at": "API Gateway (edge), per route: the stage default below for every route, except the ones listed in per_route",
    "sustained_rps": 50,
    "burst": 40,
+   "per_route": {
+    "GET /wallets/{wallet}/exists": {
+     "sustained_rps": 10,
+     "burst": 20,
+     "also_as": "GET /v1/wallets/{wallet}/exists",
+     "methods": [
+      "GET",
+      "HEAD"
+     ],
+     "why": "the free door for checking many wallets gets its own, lower budget, so a sweep cannot spend the one paying callers use; HEAD is in because it answers the same status and the same Content-Length as the GET, so it reads the yes/no too",
+     "scope": "these numbers are set per route key, and this route has four (GET and HEAD, with and without /v1); whether the gateway counts them as one bucket or as four has not been measured on the deployed stage yet"
+    }
+   },
    "on_exceed": "HTTP 429 from the gateway before the application runs; back off and retry",
    "policy_header": "RateLimit-Policy on every response (RFC 9239 syntax), with the gateway's live values — read the header, do not hardcode it",
    "per_request_counter": "none on purpose — the application cannot see the gateway budget and will not fabricate RateLimit remaining/reset",
    "cache_note": "CloudFront-cached free routes do not consume the budget on a cache hit",
-   "source": "DESCRIBENET_THROTTLE_RATE / DESCRIBENET_THROTTLE_BURST, set by Terraform from var.throttling_rate_limit / var.throttling_burst_limit — the same variables that configure the stage. null here means this build was not told them, never that there is no limit."
+   "source": "DESCRIBENET_THROTTLE_RATE / DESCRIBENET_THROTTLE_BURST, set by Terraform from var.throttling_rate_limit / var.throttling_burst_limit — the same variables that configure the stage; per_route from DESCRIBENET_THROTTLE_EXISTS_RATE / DESCRIBENET_THROTTLE_EXISTS_BURST, from var.exists_throttling_*. null here means this build was not told them, never that there is no limit."
   }
  },
  "servers": [
@@ -238,7 +251,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -422,7 +435,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -591,7 +604,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -775,7 +788,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -944,7 +957,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -1147,7 +1160,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -1411,7 +1424,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -1595,7 +1608,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -1810,6 +1823,43 @@
     "security": [],
     "x-payment": "x402",
     "x-pricing-tier": "stats-issuers",
+    "x-price-usd": "0"
+   }
+  },
+  "/categories": {
+   "get": {
+    "tags": [
+     "Free"
+    ],
+    "summary": "The directory's category catalog, with live offer counts — free",
+    "description": "The categories somebody can already be pointed at in this index, each with a stable `slug`, its label and definition in English and Spanish, the `tag_suffixes` it counts, the measurement that admitted it, and its offer measured live: `providers_at_least` distinct subjects rated as EXECUTORS in that category and the `evidence` facets behind the number.\n\nFEW ROWS, ON PURPOSE. A category enters when it can be pointed at — emitted as the suffix of a ratified role, by at least as many distinct offering subjects as the facet gate published in `GET /health` — never as a list of what we wish existed. `coverage` travels in the same answer so nobody reads the seed as the market: measured 2026-09-14, 0.75 % of the eligible grain carries a task category.\n\nHOW TO READ THE COUNT. `providers_at_least` is a lower bound — one subject can sit in two sibling facets, so the maximum is what is true. Only the offer direction counts (`publisher_rates_executor`); ratings of whoever PAID are demand and are left out. Null means no offer, never zero.\n\nThe order is alphabetical by slug and that is a rule: the order of a directory is never sold. No people are listed (`subject_type: human` is closed until its owner decides), no geography, no score per category. `catalog_version` versions the data; `GET /health` says which version and which copy are in force.",
+    "operationId": "getCategories",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CategoryCatalog"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "**Too many requests.** Throttled at the edge by the gateway **before the request reaches the application**, so nothing was queried, nothing was charged and no `X-PAYMENT` you may have sent was consumed — replay the identical request, credential included. This deployment's budget is **50 requests/second sustained, bursts up to 40** (`RateLimit-Policy: 50;w=1;burst=40`). Back off and retry; one second of pause clears the bucket. Read `RateLimit-Policy` on any response for the live budget instead of hardcoding it. The budget is shared by every caller: cached free routes served by CloudFront do not consume it on a cache hit.",
+      "headers": {
+       "RateLimit-Policy": {
+        "description": "The gateway's policy in RFC 9239 syntax (`<requests>;w=1;burst=<n>`), read from its own configuration. Emitted on every response, not only on this one.",
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "security": [],
+    "x-payment": "x402",
+    "x-pricing-tier": "categories",
     "x-price-usd": "0"
    }
   },
@@ -2073,6 +2123,90 @@
     "security": []
    }
   },
+  "/wallets/{wallet}/exists": {
+   "get": {
+    "tags": [
+     "Free"
+    ],
+    "summary": "Is there anything on this wallet worth paying for? Yes/no and counts — free",
+    "description": "**The sweep door, free.** Whether a wallet holds any ERC-8004 identity and any reputation, as booleans and counts — sized for checking a thousand addresses before spending a cent on any of them.\n\n**This service does not charge for saying there is nothing.** Every figure here is already free, chain by chain, in `GET /wallets/{wallet}/chains`; this route drops the agent ids and the scores so the answer stays small.\n\n`next` says where to go, and each key appears only when it applies. `next.free` is there when the wallet holds an identity. `next.paid` —the paid decomposition, its price, and a preview of one count and one date— is there **only when an identity has ratings to decompose**. Absent means nothing to buy. The preview is counts and dates: never a value, never an address.\n\n`next.paid.price_usd` comes from the same paywall that charges, but this response is cacheable at the edge for about a minute: **the authoritative price for the call is the `accepts[]` of its own 402**.\n\nThe counts come from the materialized view named in `source`, recomputed after each indexing run; `refreshed_at` is when that last succeeded.",
+    "operationId": "getWalletExists",
+    "parameters": [
+     {
+      "name": "wallet",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "description": "The wallet address: EVM (`0x…`, case-insensitive) or a Solana base58 id (case-SENSITIVE).",
+       "examples": [
+        "0x715dc035ffb97dd7bb4095c6670138ba05bb4e6d",
+        "DevFFyNWxZPtYLpEjzUnN1PFc9Po6PH7eZCi9f3tTkTw"
+       ],
+       "title": "Wallet"
+      },
+      "description": "The wallet address: EVM (`0x…`, case-insensitive) or a Solana base58 id (case-SENSITIVE)."
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/WalletExists"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "`not_an_address` — the path segment is neither an EVM address (`0x` + 40 hex) nor a Solana base58 id (32-44 chars). Same rule as `GET /wallets/{wallet}/chains`.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "detail"
+         ],
+         "properties": {
+          "detail": {
+           "type": "object",
+           "required": [
+            "error",
+            "wallet"
+           ],
+           "properties": {
+            "error": {
+             "type": "string"
+            },
+            "wallet": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "**Too many requests.** Throttled at the edge by the gateway **before the request reaches the application**, so nothing was queried, nothing was charged and no `X-PAYMENT` you may have sent was consumed — replay the identical request, credential included. This deployment's budget is **10 requests/second sustained, bursts up to 20** (`RateLimit-Policy: 10;w=1;burst=20`). Back off and retry; one second of pause clears the bucket. Read `RateLimit-Policy` on any response for the live budget instead of hardcoding it. This route has its OWN budget, lower than the rest of the API, on each of its route keys: `GET` and `HEAD`, with and without `/v1`. It is shared by every caller of that key; whether the four keys share one bucket or hold one each has not been measured on the deployed stage yet.",
+      "headers": {
+       "RateLimit-Policy": {
+        "description": "The gateway's policy in RFC 9239 syntax (`<requests>;w=1;burst=<n>`), read from its own configuration. Emitted on every response, not only on this one.",
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "x-payment": "x402",
+    "x-pricing-tier": "wallet-exists",
+    "x-price-usd": "0",
+    "security": []
+   }
+  },
   "/badge/{wallet}.svg": {
    "get": {
     "tags": [
@@ -2194,7 +2328,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -2378,7 +2512,7 @@
         }
        },
        "X-Pricing-Version": {
-        "description": "The pricing table this quote came from (currently `cost-tiered@6`).",
+        "description": "The pricing table this quote came from (currently `cost-tiered@9`).",
         "schema": {
          "type": "string"
         }
@@ -2994,7 +3128,7 @@
       },
       "type": "array",
       "title": "Caveats",
-      "description": "The traps THESE numbers trigger, already written out. Derived from the fields of this same response — `score`, `review_count`, `concentration`, `self_rated` — never from a second query. **Advisory: it never moves the score and never fills a null one.** An empty list means no trap fired, NOT 'verified clean'. Spanish prose, same rules as the wallet route, from the same module. Each entry is `{code, text}`: branch on `code`, never on `text`."
+      "description": "The traps THESE numbers trigger, already written out. Derived from the fields of this same response — `score`, `review_count`, `concentration`, `self_rated`, `ratings[].author_class` — never from a second query. **Advisory: it never moves the score and never fills a null one.** An empty list means no trap fired, NOT 'verified clean'. Spanish prose, same rules as the wallet route, from the same module. Each entry is `{code, text}`: branch on `code`, never on `text`."
      },
      "ratings": {
       "items": {
@@ -3043,6 +3177,358 @@
     ],
     "title": "AgentScore",
     "description": "One agent identity and EVERY rating it received.\n\nThe most detailed thing this API sells: not a number but the population\nthat produced it, row by row, with the transaction behind each one and the\nrevoked ones included. `caveats` comes BEFORE `ratings` on purpose — that\nlist can carry over 310,000 rows, and a warning that only shows up after it\nis a warning nobody reads."
+   },
+   "CatalogStatus": {
+    "properties": {
+     "catalog_version": {
+      "type": "string",
+      "title": "Catalog Version"
+     },
+     "source": {
+      "type": "string",
+      "enum": [
+       "s3",
+       "bundled"
+      ],
+      "title": "Source"
+     },
+     "categories": {
+      "type": "integer",
+      "title": "Categories"
+     }
+    },
+    "type": "object",
+    "required": [
+     "catalog_version",
+     "source",
+     "categories"
+    ],
+    "title": "CatalogStatus",
+    "description": "Which catalog is in force, published in `/health` like every other version."
+   },
+   "Category": {
+    "properties": {
+     "slug": {
+      "type": "string",
+      "title": "Slug",
+      "description": "Stable key, at most 15 bytes (what a Solana tag leaves after the longest role prefix). Never deleted, never reused; the label is never the key."
+     },
+     "subject_type": {
+      "type": "string",
+      "enum": [
+       "agent",
+       "human",
+       "robot"
+      ],
+      "title": "Subject Type",
+      "description": "Who can be listed under it — the same vocabulary as MeshRelay's `subject_type` and Execution Market's `executor_type`. No `human` row is published: listing people is an open decision of the owner."
+     },
+     "name": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "type": "object",
+      "title": "Name",
+      "description": "Label by language: `en` and `es`."
+     },
+     "definition": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "type": "object",
+      "title": "Definition",
+      "description": "Short definition by language: `en` and `es`."
+     },
+     "tag_suffixes": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array",
+      "title": "Tag Suffixes",
+      "description": "The suffixes emitted in `tag1` that count for this category — the versioned short↔long mapping (`knowledge` ↔ `knowledge_access`)."
+     },
+     "esco": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Esco",
+      "description": "Optional ESCO reference. Null is measured, not pending: 0 of the 152 measurable facets of this index have an ESCO entry."
+     },
+     "since": {
+      "type": "string",
+      "title": "Since",
+      "description": "The `catalog_version` that admitted this row."
+     },
+     "admitted": {
+      "$ref": "#/components/schemas/CategoryAdmission"
+     },
+     "providers_at_least": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Providers At Least",
+      "description": "A LOWER BOUND of distinct subjects rated as executors in this category, live: the maximum over its facets, because one subject can sit in two sibling facets and a sum would count it twice. Null when there is no offer at all — never 0."
+     },
+     "provider_ratings": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Provider Ratings",
+      "description": "Ratings in the offer direction, live. A sum: ratings never double-count."
+     },
+     "evidence": {
+      "items": {
+       "$ref": "#/components/schemas/CategoryEvidence"
+      },
+      "type": "array",
+      "title": "Evidence"
+     }
+    },
+    "type": "object",
+    "required": [
+     "slug",
+     "subject_type",
+     "name",
+     "definition",
+     "tag_suffixes",
+     "since",
+     "admitted",
+     "providers_at_least",
+     "provider_ratings",
+     "evidence"
+    ],
+    "title": "Category",
+    "description": "One category of the directory: a stable key, its labels, and its live offer."
+   },
+   "CategoryAdmission": {
+    "properties": {
+     "by": {
+      "type": "string",
+      "title": "By",
+      "description": "`emission`: the category travels in the index as the suffix of a ratified role. The only door open today; declared offers are the write path of a later phase."
+     },
+     "measured_at": {
+      "type": "string",
+      "title": "Measured At"
+     },
+     "provider_subjects_at_least": {
+      "type": "integer",
+      "title": "Provider Subjects At Least"
+     },
+     "provider_ratings": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Provider Ratings"
+     },
+     "provider_facets": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array",
+      "title": "Provider Facets"
+     }
+    },
+    "type": "object",
+    "required": [
+     "by",
+     "measured_at",
+     "provider_subjects_at_least"
+    ],
+    "title": "CategoryAdmission",
+    "description": "The measurement that let this row into the catalog, frozen with its date."
+   },
+   "CategoryCatalog": {
+    "properties": {
+     "catalog_version": {
+      "type": "string",
+      "title": "Catalog Version",
+      "description": "Version of the catalog DATA (`catalog@N`). Two answers with the same version list the same rows with the same labels — a test freezes it."
+     },
+     "catalog_source": {
+      "type": "string",
+      "enum": [
+       "s3",
+       "bundled"
+      ],
+      "title": "Catalog Source",
+      "description": "`s3` when the published copy was adopted; `bundled` when the service fell back to the copy inside its artifact (never older, never missing a slug)."
+     },
+     "ordering": {
+      "type": "string",
+      "title": "Ordering",
+      "description": "`slug-alphabetical`, and it is a rule: the order of a directory is never sold, so it is never by volume or by reputation."
+     },
+     "provider_direction": {
+      "type": "string",
+      "title": "Provider Direction"
+     },
+     "categories": {
+      "items": {
+       "$ref": "#/components/schemas/Category"
+      },
+      "type": "array",
+      "title": "Categories"
+     },
+     "coverage": {
+      "$ref": "#/components/schemas/CategoryCoverage"
+     },
+     "counts_source": {
+      "type": "string",
+      "title": "Counts Source"
+     },
+     "refreshed_at": {
+      "anyOf": [
+       {
+        "type": "string",
+        "format": "date-time"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Refreshed At",
+      "description": "When the facet view behind the counts was recomputed. NOT the date of the data — that is `evidence[].freshness`."
+     }
+    },
+    "type": "object",
+    "required": [
+     "catalog_version",
+     "catalog_source",
+     "ordering",
+     "provider_direction",
+     "categories",
+     "coverage",
+     "counts_source",
+     "refreshed_at"
+    ],
+    "title": "CategoryCatalog",
+    "description": "The directory's catalog: few rows, each one pointable at in the index."
+   },
+   "CategoryCoverage": {
+    "properties": {
+     "categorized_ratings": {
+      "type": "integer",
+      "title": "Categorized Ratings"
+     },
+     "facet_ratings": {
+      "type": "integer",
+      "title": "Facet Ratings"
+     },
+     "share": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Share"
+     }
+    },
+    "type": "object",
+    "required": [
+     "categorized_ratings",
+     "facet_ratings",
+     "share"
+    ],
+    "title": "CategoryCoverage",
+    "description": "How much of the index carries a task category at all — beside the rows, on purpose."
+   },
+   "CategoryEvidence": {
+    "properties": {
+     "facet": {
+      "type": "string",
+      "title": "Facet",
+      "description": "The raw `tag1` the issuer emitted, e.g. `worker_rating:research`."
+     },
+     "role": {
+      "type": "string",
+      "title": "Role",
+      "description": "The ratified role prefix of that tag (allowlist, never a `split(':')`)."
+     },
+     "direction_meaning": {
+      "type": "string",
+      "title": "Direction Meaning",
+      "description": "Always `publisher_rates_executor` here: the rated subject is the one who DID the work. The opposite direction rates whoever PAID — demand, not offer — and is left out of this catalog on purpose."
+     },
+     "ratings": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Ratings"
+     },
+     "distinct_subjects": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Distinct Subjects",
+      "description": "Distinct rated subjects (operators) within THIS facet — exact within it."
+     },
+     "distinct_agents": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Distinct Agents"
+     },
+     "freshness": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/Freshness"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "type": "object",
+    "required": [
+     "facet",
+     "role",
+     "direction_meaning",
+     "ratings",
+     "distinct_subjects",
+     "distinct_agents"
+    ],
+    "title": "CategoryEvidence",
+    "description": "One facet that evidences the offer, exactly as `GET /stats/facets` serves it."
    },
    "Caveat": {
     "properties": {
@@ -3672,6 +4158,131 @@
     "title": "ConfidenceInterval",
     "description": "Wilson al 95 %, reescalado al dominio 0-100. NO es un score."
    },
+   "ExistsFree": {
+    "properties": {
+     "endpoint": {
+      "type": "string",
+      "title": "Endpoint",
+      "description": "The free route to call next, in its reusable form (`{wallet}` is not interpolated)."
+     },
+     "gives": {
+      "type": "string",
+      "title": "Gives"
+     }
+    },
+    "type": "object",
+    "required": [
+     "endpoint",
+     "gives"
+    ],
+    "title": "ExistsFree",
+    "description": "El paso gratis siguiente sobre la MISMA wallet."
+   },
+   "ExistsNext": {
+    "properties": {
+     "free": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/ExistsFree"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Present only when the wallet holds at least one ERC-8004 identity: otherwise the per-chain map would be empty too."
+     },
+     "paid": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/ExistsPaid"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Present only when the wallet holds an identity AND has ratings to decompose. Absent — not null — means there is nothing to buy: this service does not charge for saying so."
+     }
+    },
+    "type": "object",
+    "title": "ExistsNext",
+    "description": "Dónde ir después. Cada clave aparece SÓLO cuando aplica.\n\nSe omiten y no van en `null` porque la ausencia ES la respuesta: sin\n`paid` no hay nada que comprar. La omisión sale de\n`response_model_exclude_unset` en la ruta — `pricing.exists_next` no pone\nla clave, así que queda sin setear y no se serializa."
+   },
+   "ExistsPaid": {
+    "properties": {
+     "endpoint": {
+      "type": "string",
+      "title": "Endpoint",
+      "description": "The paid route, in its reusable form (`{wallet}` is not interpolated)."
+     },
+     "price_usd": {
+      "type": "string",
+      "title": "Price Usd",
+      "description": "USDC, as a string — a float price rounds itself. Read from the same paywall that charges, but this response can sit in the edge cache for a minute: the authoritative amount for the call is the `accepts[]` of its own 402."
+     },
+     "pricing_version": {
+      "type": "string",
+      "title": "Pricing Version"
+     },
+     "tier": {
+      "type": "string",
+      "title": "Tier"
+     },
+     "preview": {
+      "$ref": "#/components/schemas/ExistsPreview"
+     },
+     "how": {
+      "type": "string",
+      "title": "How"
+     }
+    },
+    "type": "object",
+    "required": [
+     "endpoint",
+     "price_usd",
+     "pricing_version",
+     "tier",
+     "preview",
+     "how"
+    ],
+    "title": "ExistsPaid",
+    "description": "La compra, con su precio leído del paywall montado."
+   },
+   "ExistsPreview": {
+    "properties": {
+     "distinct_raters": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Distinct Raters",
+      "description": "Distinct wallets that rated this one, deduplicated across chains — the same figure `GET /wallets/{wallet}/chains` serves free. `null` means the wallet is not in the ranking, not zero raters."
+     },
+     "last_eligible_rating_at": {
+      "anyOf": [
+       {
+        "type": "string",
+        "format": "date-time"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Last Eligible Rating At",
+      "description": "When the most recent rating that counts toward the score was written on-chain. `null` when it is not known — never a stand-in date."
+     }
+    },
+    "type": "object",
+    "required": [
+     "distinct_raters",
+     "last_eligible_rating_at"
+    ],
+    "title": "ExistsPreview",
+    "description": "Lo que el preview de la compra puede decir: CUÁNTO hay, nunca QUÉ dice."
+   },
    "Facet": {
     "properties": {
      "score": {
@@ -4228,6 +4839,22 @@
         "type": "null"
        }
       ]
+     },
+     "catalog": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/CatalogStatus"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "identity": {
+      "additionalProperties": true,
+      "type": "object",
+      "title": "Identity",
+      "description": "Sign-in by signature (EIP-4361) for owners of ERC-8004 agents — the web app, not the API. `enabled: false` means the `/auth/*` and `/me/*` routes answer 404. Either way **no session ever reads a metered route**: payment stays the only authentication for reading. Also published: the domains and chain ids a signature is accepted for, the nonce and session lifetimes, the per-minute rate limits, and `erc1271_chain_ids` — the chains where a smart-account signature can be checked right now."
      }
     },
     "type": "object",
@@ -5076,6 +5703,15 @@
       "title": "Client",
       "description": "Who wrote this rating: the rater's address. This is the field the whole product is about — a score without its raters is a rumor."
      },
+     "author_class": {
+      "type": "string",
+      "enum": [
+       "facilitator-authored",
+       "rater-authored"
+      ],
+      "title": "Author Class",
+      "description": "Who signed this row, as a class. `facilitator-authored`: `client` is a known relayer (today the x402 facilitator's EVM wallet) that wrote the rating on behalf of the real rater, so `client` is NOT the counterparty — every such row shares one `client`, and any per-rater count merges them into one. `rater-authored`: `client` is not a relayer this index knows about; it does not prove who signed. Per rating only: no score or aggregate is computed by author class."
+     },
      "feedback_index": {
       "type": "integer",
       "title": "Feedback Index",
@@ -5249,6 +5885,7 @@
     "type": "object",
     "required": [
      "client",
+     "author_class",
      "feedback_index",
      "value",
      "value_decimals",
@@ -5779,6 +6416,14 @@
       "title": "Caveats",
       "description": "SUBSET of the caveats: only those computable from public data without touching the grain (today: `burn-address`, for well-known burn addresses -- nobody controls them, nobody can answer for their reputation -- and, since 2026-09-05, `thin-chain`: a chain with fewer than `reading_policy.min_raters` distinct raters on a multi-chain wallet, computable because every row here carries `distinct_raters` and `weight`). The rest of the evidence-quality set (concentration, single rater, campaign...) travels ONLY in the paid decomposition `GET /reputation/wallet/{wallet}`. An empty list here means 'no public-data caveat', NOT 'no caveats at all'."
      },
+     "caveats_not_computed": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array",
+      "title": "Caveats Not Computed",
+      "description": "The caveat `code`s that the paid decomposition `GET /reputation/wallet/{wallet}` evaluates and THIS free answer did not — sorted, and derived from the same module that serves `caveats`. Names only, never their outcome: whether any of them fires for this wallet is exactly what stays paid. A quality gate built on this route must treat every code listed here as unverified, not as passed."
+     },
      "identity_count": {
       "type": "integer",
       "title": "Identity Count",
@@ -5858,6 +6503,7 @@
      "wallet",
      "chains",
      "caveats",
+     "caveats_not_computed",
      "identity_count",
      "chains_with_identity",
      "chains_with_reputation",
@@ -5897,6 +6543,78 @@
       "wallet": "0x715dc035ffb97dd7bb4095c6670138ba05bb4e6d"
      }
     ]
+   },
+   "WalletExists": {
+    "properties": {
+     "wallet": {
+      "type": "string",
+      "title": "Wallet",
+      "description": "The wallet asked about, normalised. EVM addresses come back lowercased; Solana keeps its base58 case."
+     },
+     "has_identity": {
+      "type": "boolean",
+      "title": "Has Identity",
+      "description": "Holds at least one ERC-8004 identity on a chain we read."
+     },
+     "identity_count": {
+      "type": "integer",
+      "title": "Identity Count"
+     },
+     "chains_with_identity": {
+      "type": "integer",
+      "title": "Chains With Identity"
+     },
+     "has_reputation": {
+      "type": "boolean",
+      "title": "Has Reputation",
+      "description": "Has ratings on at least one chain. `false` with `has_identity: true` is registered-but-unrated, a different fact from unregistered."
+     },
+     "chains_with_reputation": {
+      "type": "integer",
+      "title": "Chains With Reputation"
+     },
+     "total_reviews": {
+      "type": "integer",
+      "title": "Total Reviews",
+      "description": "Ratings across every chain. Volume, not agreement."
+     },
+     "source": {
+      "type": "string",
+      "title": "Source",
+      "description": "The materialized view the counts come from."
+     },
+     "refreshed_at": {
+      "anyOf": [
+       {
+        "type": "string",
+        "format": "date-time"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Refreshed At",
+      "description": "When that view was last recomputed. `null` means not recorded, never 'just now'."
+     },
+     "next": {
+      "$ref": "#/components/schemas/ExistsNext"
+     }
+    },
+    "type": "object",
+    "required": [
+     "wallet",
+     "has_identity",
+     "identity_count",
+     "chains_with_identity",
+     "has_reputation",
+     "chains_with_reputation",
+     "total_reviews",
+     "source",
+     "refreshed_at",
+     "next"
+    ],
+    "title": "WalletExists",
+    "description": "El sí/no de una wallet, en la forma mínima para barrer en masa.\n\n🔴 `response_model_exclude_unset` ESTÁ PRENDIDO EN ESTA RUTA, y eso vuelve\npeligroso agregar un campo con default: si el handler no lo setea, se\nomite en silencio en vez de salir `null`. Todo campo de este modelo lo\nsetea el handler SIEMPRE, también cuando vale `None`\n(`tests/test_wallet_exists_contrato.py` fija el juego de claves)."
    },
    "WalletHistory": {
     "properties": {

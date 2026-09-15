@@ -107,14 +107,29 @@ export type { DescribeErrorKind, PaymentAttempt, X402Challenge } from './errors'
 export { RECOVERY, recoveryFor } from './recovery';
 export type { RecoveryKey } from './recovery';
 
+/**
+ * The caveat contract. Since 0.4.0 it also carries the two halves describe.net
+ * shipped on 2026-09-14: `requireFullCaveats()` — the gate that can fail a free
+ * answer which did not evaluate the evidence-quality cuts — and the author
+ * classes of `Rating.authorClass`.
+ *
+ * 🔴 `CaveatsNotComputedError` is exported HERE and not with the errors above,
+ * on purpose: it is not a `DescribeError`. A refusal of the gate is a successful
+ * read that does not support the decision, and a `catch` that fails open on
+ * `DescribeError` must not be able to swallow it.
+ */
 export {
+  AUTHOR_CLASSES,
   CAVEAT_CODES,
   CAVEAT_SCOPE_FREE,
   CAVEAT_SCOPE_METERED,
+  CaveatsNotComputedError,
   hasCaveat,
+  isKnownAuthorClass,
   isKnownCaveatCode,
+  requireFullCaveats,
 } from './caveats';
-export type { Caveat, CaveatCode, KnownCaveatCode } from './caveats';
+export type { AuthorClass, Caveat, CaveatCode, KnownAuthorClass, KnownCaveatCode } from './caveats';
 
 export { formatScore, roundScore } from './format';
 
