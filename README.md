@@ -271,6 +271,7 @@ apply to the metered routes at all:
 | `partner_unsigned` | **throws** | **throws** | no | partner mode on and the signature could not be produced. **Yours**, and it throws on the free routes too — an unsigned partner client is an anonymous client, and an anonymous client pays |
 | `partner_rejected` | — | **throws** | no | you signed and were charged anyway: the free rail is off. Thrown *before* the payer, so nothing was spent |
 | `malformed_hash` | announced | **announced** | no | a hash field was not a hash, so it was dropped. **Never thrown, on any route** — the read succeeded and the rest of it is good. See [Malformed hashes](#malformed-hashes-are-dropped-marked-and-announced) |
+
 With `failOpen: false` the free routes throw instead. `not_found` on a free
 route never throws either way: `failOpen` is about *their outage*, absence is a
 different axis.

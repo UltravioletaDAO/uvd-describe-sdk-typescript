@@ -1,8 +1,8 @@
 # Changelog
 
 Newest first. A version listed here is a version on `main`, **not** a version on
-npm: publishing is a `vX.Y.Z` tag, and the tag is pushed by whoever releases
-(c0der), never by the change that bumps the number.
+npm: publishing is a `vX.Y.Z` tag, and the tag is pushed by whoever releases,
+never by the change that bumps the number.
 
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
@@ -14,7 +14,27 @@ deployed in `aa1bd75`). Upstream-first: this version exists so that Execution
 Market, KarmaKadabra, MeshRelay and karma-hello adopt the fields through the SDK
 instead of reading them by hand. The Python twin (`uvd-describe-sdk` 0.6.0) ships
 the same contract in its own spelling — same states, same refusals, same class
-name for the error.
+name for the error. The one intended difference is the wording of that error's
+`recovery`, which names each language's own API.
+
+### Breaking — only for code that builds these objects by hand
+
+- `WalletReputation.caveatsNotComputed` and `Rating.authorClass` are
+  **required** properties. An object literal typed as `WalletReputation`,
+  `Rating`, or `AgentReputation` (through `ratings`) that compiled against 0.3.0
+  no longer compiles against 0.4.0: `TS2741: Property 'caveatsNotComputed' is
+  missing` / `Property 'authorClass' is missing` (measured with `tsc --strict`).
+  Typically a test fixture or a mock. Fix: add the two fields, or build the
+  object from a payload with `parseWalletReputation()` / `parseAgentReputation()`,
+  which fill them.
+- If you have nothing to put there, write `null` in both — never `[]`, which
+  claims every cut was evaluated, and never `'rater-authored'`, which claims a
+  signer the index cannot vouch for.
+- They stay required on purpose, and what the parsers return is unchanged.
+  Making them optional would add a fourth state, `undefined`, to every result
+  of `wallet()` and `agent()`, next to the three (`[]`, a list, `null`) this
+  version exists to keep apart.
+- Code that only reads what the client or the parsers return is not affected.
 
 ### Added
 
@@ -54,7 +74,8 @@ name for the error.
 
 ### Unchanged, on purpose
 
-- No method changed its return type, nothing throws where it did not, and
+- No method changed its return type (the types it returns gained two required
+  fields — see *Breaking*), nothing throws where it did not, and
   `DescribeErrorKind` is untouched. The client never calls the gate; `failOpen`
   and `onFailure` behave exactly as in 0.3.0.
 
