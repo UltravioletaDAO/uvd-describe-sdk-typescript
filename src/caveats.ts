@@ -15,8 +15,7 @@
  * string comparison kept returning false and nobody was told.
  *
  * Exporting the set is one of the four "día 0" requirements the platform team
- * put on any SDK of the house (`D9-c0der.md:234-241`): *los caveat `code`s como
- * contrato exportado*. Typing them here means a consumer never re-types them,
+ * put on any SDK of the house: *los caveat `code`s como contrato exportado*. Typing them here means a consumer never re-types them,
  * and a typo is a compile error rather than a branch that is never taken.
  *
  * ## Why the type is not a closed union
