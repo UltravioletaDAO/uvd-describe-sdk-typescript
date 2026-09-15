@@ -42,7 +42,7 @@
  * nothing about which happened.
  */
 
-import type { Caveat } from './caveats';
+import type { AuthorClass, Caveat, CaveatCode } from './caveats';
 
 /** The eleven indexed chains are strings on the wire. Never an enum here: the index adds chains. */
 export type Network = string;
@@ -196,6 +196,34 @@ export interface WalletReputation extends Sealed {
   chainsWithIdentity: number;
   chainsWithReputation: number;
   totalReviews: number;
+  /**
+   * The caveat codes that the paid decomposition evaluates and THIS free answer
+   * did not — sorted, served since describe.net 2026-09-14
+   * (`describenet/caveats.py:525-532`, `not_computed_public`, derived from the
+   * same module that builds `caveats`). **Names, never outcomes**: whether any of
+   * them fires for this wallet is exactly what stays paid.
+   *
+   * Seven codes on 2026-09-15, for a wallet with 471 raters and for `0xdead…beef`
+   * alike — the declaration depends on what the route evaluates, not on the
+   * subject. Read it live; the count is not a constant.
+   *
+   * 🔴 **Three states, and they stay three:**
+   *
+   * ```
+   *   ['few-raters', …]  NOT evaluated here — read each one as UNVERIFIED, never as passed
+   *   []                 the answer says it evaluated every wallet-scope cut
+   *   null               nothing readable was declared: a server older than 2026-09-14,
+   *                      a payload stored before then, or a value that is not a list
+   *                      of non-empty strings. NOT `[]` — nothing was promised, and
+   *                      `caveatScope` still says what was evaluated
+   * ```
+   *
+   * The failure this field closes is karma-hello's (2026-08-31): a quality gate
+   * built on this route passed every wallet, because `caveats: []` here is the
+   * silence of cuts that were never run. Do not gate on it by hand —
+   * `requireFullCaveats()` is the gate, and it reads the `null` correctly.
+   */
+  caveatsNotComputed: CaveatCode[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +409,27 @@ export interface WalletBreakdown extends Sealed {
  */
 export interface Rating {
   client: string;
+  /**
+   * Who SIGNED this row, as a class — served since describe.net 2026-09-14
+   * (`describenet/api.py:962`, `rating_roles.author_class_of`).
+   *
+   * - `facilitator-authored` — `client` is a known relayer (today the x402
+   *   facilitator's EVM wallet) that wrote the rating on behalf of the real
+   *   rater. **`client` is NOT the counterparty**: every such row shares one
+   *   `client`, so any per-rater count — `concentration.distinctRaters`,
+   *   `topClientShare` — merges all of them into one voice. Filter on this
+   *   before reading `client` as "who rated".
+   * - `rater-authored` — `client` is not a relayer the index knows about. 🔴 It
+   *   does NOT prove who signed; it is the absence of a known relayer.
+   * - `null` — no class was served (a server older than 2026-09-14, or a stored
+   *   payload). Unknown, and deliberately NOT defaulted to `rater-authored`:
+   *   that would assert the one thing the index says it cannot.
+   *
+   * An unknown string arrives VERBATIM — the union is open, like `CaveatCode`,
+   * and `isKnownAuthorClass()` says whether this SDK has heard of it. Per row
+   * only: neither the index nor this SDK computes any score or count by class.
+   */
+  authorClass: AuthorClass | null;
   feedbackIndex: number;
   value: number;
   valueDecimals: number;

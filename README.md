@@ -119,15 +119,65 @@ if (hasCaveat(rep, 'burn-address')) { /* nobody controls this address */ }
 if (hasCaveat(rep, 'few-raters'))   { /* thin evidence */ }
 ```
 
-The eight codes are exported and typed: `no-score`, `concentration-degraded`,
+The nine codes are exported and typed: `no-score`, `concentration-degraded`,
 `single-rater`, `few-raters`, `top-client-share`, `campaign-per-rater`,
-`self-rated`, `burn-address`. The union stays **open**, so a ninth code the
-server adds tomorrow will not be a type error in code you already shipped.
+`self-rated`, `burn-address`, `facilitator-authored` (since 0.4.0). The union
+stays **open**, so a code the server adds tomorrow will not be a type error in
+code you already shipped. ⚠️ describe.net serves a tenth, `thin-chain` (since
+2026-09-04, on the free route too), that neither this package nor its Python twin
+mirrors yet: `isKnownCaveatCode('thin-chain')` is `false`, and the caveat still
+arrives whole.
 
 ⚠️ On free routes `caveats: []` means *no **public-data** caveat*, not "clean" —
 the evidence-quality cuts need the grain and ride the metered routes. Check
 `rep.caveatScope` (`public-data-subset` vs `full`) before calling anything
 clean.
+
+**Since 0.4.0 the free route names the cuts it skipped, and there is a gate for
+it.** karma-hello found the trap (2026-08-31): a quality gate on `wallet()`
+passes *every* wallet, because the cuts it checks never ran. describe.net now
+declares them in `caveats_not_computed` (`rep.caveatsNotComputed`), and
+`requireFullCaveats` is the gate that reads the declaration:
+
+```ts
+import { CaveatsNotComputedError, requireFullCaveats } from 'uvd-describe-sdk';
+
+const rep = await describe.wallet(w);
+if (rep === null) { /* no answer at all: decide that first */ }
+
+try {
+  requireFullCaveats(rep);
+} catch (e) {
+  if (e instanceof CaveatsNotComputedError) {
+    e.notComputed;   // ['campaign-per-rater', …] — or null: nothing was declared
+    e.recovery;      // the route that does evaluate them
+  }
+}
+```
+
+| `rep.caveatsNotComputed` | `requireFullCaveats(rep)` |
+|---|---|
+| `[]` | returns `rep` — the only state that passes |
+| `['few-raters', …]` | throws; `notComputed` is the list |
+| `null` — a server before 2026-09-14, a payload stored before then, or a declaration that cannot be read whole | **throws**; `notComputed` is `null` |
+
+🔴 **Today it throws for every free answer** (seven codes declared on
+2026-09-15). That is the gate working: the evidence-quality cuts are what
+`walletBreakdown()` sells, and a decision that needs them reads that — or the
+partner rail. `null` is not `[]`: an old answer's silence is the old gap, not a
+clean bill (describe.net's position of 2026-08-31 is *"el scope es la señal"*,
+and its own MCP tool keeps the same `None`). Passing means the caveats are
+**complete**, not empty — ask `hasCaveat()` after the gate.
+
+Two things it is not, on purpose — and the Python twin (`require_full_caveats`,
+`CaveatsNotComputedError`) makes the same two choices:
+
+* **Not a `DescribeError`.** A refusal is a successful read that does not support
+  the decision. A `catch` that fails open on `DescribeError` must not be able to
+  read it as "describe is down" and wave the subject through.
+* **Not for metered results.** It takes the `WalletReputation` of `wallet()` and
+  throws a `TypeError` for anything else: a breakdown evaluates its own scope and
+  declares no omissions.
 
 ### 4. One display format, ecosystem-wide
 
@@ -221,7 +271,6 @@ apply to the metered routes at all:
 | `partner_unsigned` | **throws** | **throws** | no | partner mode on and the signature could not be produced. **Yours**, and it throws on the free routes too — an unsigned partner client is an anonymous client, and an anonymous client pays |
 | `partner_rejected` | — | **throws** | no | you signed and were charged anyway: the free rail is off. Thrown *before* the payer, so nothing was spent |
 | `malformed_hash` | announced | **announced** | no | a hash field was not a hash, so it was dropped. **Never thrown, on any route** — the read succeeded and the rest of it is good. See [Malformed hashes](#malformed-hashes-are-dropped-marked-and-announced) |
-
 With `failOpen: false` the free routes throw instead. `not_found` on a free
 route never throws either way: `failOpen` is about *their outage*, absence is a
 different axis.
@@ -548,6 +597,33 @@ and an alarm that screams about good data is worse than no alarm.
 
 ---
 
+## Who signed a rating: `authorClass`
+
+Since describe.net 2026-09-14 every row of `agent().ratings` carries the class of
+whoever **signed** it:
+
+```ts
+const agent = await describe.agent('base', 42);
+const relayed = agent.ratings.filter((r) => r.authorClass === 'facilitator-authored');
+```
+
+* `facilitator-authored` — `client` is a known relayer (today the x402
+  facilitator's EVM wallet) writing on behalf of the real rater. `client` is
+  **not** the counterparty, and every such row shares it, so any per-rater count
+  merges them into one voice. The agent answer then also carries the caveat of
+  the same name.
+* `rater-authored` — `client` is not a relayer the index knows about. It does
+  **not** prove who signed.
+* `null` — no class was served (an older server, or a stored payload). Unknown,
+  and never defaulted to `rater-authored`.
+
+The union is **open**: a class the server adds later arrives verbatim — never
+thrown, never nulled — and `isKnownAuthorClass()` tells you whether this SDK has
+heard of it. There is no count or score by author class, upstream or here; what
+to do with the rows you bought is your call.
+
+---
+
 ## Counting distinct raters
 
 ```ts
@@ -650,7 +726,7 @@ cycle.
 
 ```bash
 npm install
-npm test              # offline. 93 tests, no network
+npm test              # offline, no network. 227 tests on 2026-09-15
 npm run typecheck
 npm run lint
 npm run build

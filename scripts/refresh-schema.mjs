@@ -28,12 +28,20 @@ const URL_ = process.env.DESCRIBE_OPENAPI_URL ?? 'https://api.describe.net/opena
 const SNAPSHOT = fileURLToPath(new URL('../schema/openapi.snapshot.json', import.meta.url));
 const CHECK = process.argv.includes('--check');
 
-/** The schemas and paths this SDK actually types. Nothing else is watched. */
+/**
+ * The schemas and paths this SDK actually types. Nothing else is watched.
+ *
+ * ⚠️ `Rating` added 2026-09-15. It had been typed since 0.1.0 and was never on
+ * this list, so when describe.net made `author_class` a REQUIRED field of it
+ * (2026-09-14) the refresh reported only `WalletChains` — the other new field
+ * crossed this gate in silence. Every schema with a hand-written type goes here.
+ */
 const WATCHED_SCHEMAS = [
   'WalletChains',
   'WalletChain',
   'WalletScore',
   'AgentScore',
+  'Rating',
   'LeaderboardRow',
   'Health',
   'Caveat',
