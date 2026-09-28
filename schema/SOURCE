@@ -1,0 +1,6 @@
+# Vendored byte for byte. Regenerate with `npm run schema:refresh` (needs a
+# describe-net checkout); `src/sdk-map.test.ts` fails if a file stops matching.
+repo: UltravioletaDAO/describe-net
+commit: 434e01c6f2826405d9dadcb473d71a8398371d3b
+9b0cda254632ca43308b0745b02566ca36a8476e0e1bf3b929ec9f015fff2e51  openapi.json
+a9bff9b0cc1ca8ebd28dfd313c7de8de131080019ace61bf18a3b50daee8483f  sdk.overlay.yaml

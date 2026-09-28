@@ -73,15 +73,14 @@ jobs:
   #
   # Separate job, and NOT part of `validate`, because it is the only thing here
   # that touches the network: a red here means describe.net moved, which is a
-  # different conversation from "this PR broke something". Scheduled as well as
-  # on push, because the server can move while nobody is pushing.
+  # different conversation from "this PR broke something".
   schema-drift:
-    name: Live schema still matches the snapshot
+    name: Live schema still matches schema/openapi.json
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Compare schema/openapi.snapshot.json against the live API
+      - name: Compare schema/openapi.json against the live API
         run: npm run schema:check

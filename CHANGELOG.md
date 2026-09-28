@@ -7,6 +7,29 @@ never by the change that bumps the number.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
+## Unreleased (FG-DN-03, no version bump)
+
+### Changed
+
+- **`schema/` is describe.net's committed spec, vendored.** `schema/openapi.json`
+  and `schema/sdk.overlay.yaml` (Overlay 1.0.0) are byte-for-byte copies from
+  describe-net, pinned by sha256 in `schema/SOURCE`. They replace the
+  hand-refreshed `schema/openapi.snapshot.json`. `npm run schema:refresh` now
+  re-vendors from a describe-net checkout instead of writing the live spec.
+- **`schema/sdk-map.json`**: every operation the overlay does not hide is either
+  called by a public `DescribeClient` method (`mapeadas`) or listed in `fuera`
+  with its reason. `src/sdk-map.test.ts` runs each method against a recording
+  `fetch` and fails on an unclassified operation or a route outside the spec.
+- **`schema:check` watches what the map says.** The schemas it compares are
+  derived from the responses of the mapped operations (21, transitively; the
+  hand-written list had 8), and the operations the overlay hides (web app,
+  `/mcp`, `/a2a`) no longer count.
+
+### Unchanged, on purpose
+
+- The client, its types and its parsers. `/names/resolve` and `/names/reverse`
+  are in `fuera`, not implemented.
+
 ## 0.4.1 — 2026-09-15 (not published yet)
 
 ### Added
