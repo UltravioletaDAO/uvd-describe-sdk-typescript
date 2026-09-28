@@ -31,10 +31,12 @@
  * schema, at two speeds.
  *
  *   * `types.schema.test.ts` runs in the normal loop, offline, against
- *     `schema/openapi.snapshot.json` — a pinned copy of the live schema fetched
- *     2026-08-30. It fails when a hand-written type drifts from the schema.
+ *     `schema/openapi.json` — describe.net's committed spec, vendored (until
+ *     2026-09-28, `schema/openapi.snapshot.json`, a pinned copy of the live
+ *     schema fetched 2026-08-30). It fails when a hand-written type drifts
+ *     from the schema.
  *   * `npm run schema:check` re-fetches the live schema and diffs it against
- *     the snapshot. It fails when the SERVER moves. Deliberate, networked, and
+ *     the vendored spec. It fails when the SERVER moves. Deliberate, networked, and
  *     never in the test loop (tests do not touch the network).
  *
  * Two gates because there are two different failures: we drifted, and they

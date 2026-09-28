@@ -16,13 +16,15 @@ import {
  * The third way: hand-written types PLUS a test that ties them to the schema.
  *
  * This is the OFFLINE half, and it runs in the normal loop. It reads
- * `schema/openapi.snapshot.json` — a pinned copy of the live schema fetched
- * 2026-08-30 (re-fetched for 0.3.0 and again on 2026-09-15 for 0.4.0) — and
+ * `schema/openapi.json` — describe.net's committed spec, vendored byte for byte
+ * (see `schema/SOURCE`; until FG-DN-03 it was `schema/openapi.snapshot.json`, a
+ * pinned copy of the live schema fetched 2026-08-30, re-fetched for 0.3.0 and
+ * again on 2026-09-15 for 0.4.0) — and
  * asserts that every REQUIRED field of the schemas this SDK wraps has a home in
  * our parsed shape. It answers "did we drift?".
  *
  * The other half is `npm run schema:check`, which re-fetches the live schema
- * and diffs it against the snapshot. It answers "did THEY move?". Two failures,
+ * and diffs it against the vendored spec. It answers "did THEY move?". Two failures,
  * two gates: a generator would collapse both into "the build broke" and tell
  * you neither.
  *
@@ -32,7 +34,7 @@ import {
  * passthrough `raw` still carries it either way.
  */
 
-const SCHEMA_PATH = fileURLToPath(new URL('../schema/openapi.snapshot.json', import.meta.url));
+const SCHEMA_PATH = fileURLToPath(new URL('../schema/openapi.json', import.meta.url));
 const schema = JSON.parse(readFileSync(SCHEMA_PATH, 'utf8')) as {
   info: { version: string };
   paths: Record<string, Record<string, unknown>>;
@@ -222,11 +224,15 @@ describe('the author classes we export are the schema enum, exactly', () => {
 });
 
 describe('the snapshot is the version we wrote these types against', () => {
-  it('is describe.net 2.0.0 with 22 paths', () => {
+  it('is describe.net 2.0.0 with 32 paths', () => {
     // 20 until the refresh of 2026-09-15, which added two FREE routes this SDK
     // does not wrap (`GET /categories`, `GET /wallets/{wallet}/exists`) and the
     // two fields 0.4.0 types. `info.version` did not move: both are additive.
+    // 22 until FG-DN-03 vendored describe-net's committed spec (2026-09-28),
+    // which adds the web app (`/auth/*`, `/me*`, hidden by the overlay) and
+    // `/names/resolve` + `/names/reverse` (in `fuera` of `schema/sdk-map.json`).
+    // Still additive: `info.version` did not move.
     expect(schema.info.version).toBe('2.0.0');
-    expect(Object.keys(schema.paths)).toHaveLength(22);
+    expect(Object.keys(schema.paths)).toHaveLength(32);
   });
 });

@@ -359,7 +359,7 @@ export function requireFullCaveats(result: WalletReputation): WalletReputation {
  * The two classes served in `ratings[].author_class` since describe.net
  * 2026-09-14 — the schema's own enum (`describenet/api.py:962`,
  * `Literal["facilitator-authored", "rater-authored"]`), and
- * `types.schema.test.ts` pins this tuple against the snapshot's `enum`. The
+ * `types.schema.test.ts` pins this tuple against the vendored spec's `enum`. The
  * Python twin calls the same set `KNOWN_AUTHOR_CLASSES`, the way it calls
  * `CAVEAT_CODES` `KNOWN_CAVEAT_CODES`.
  *

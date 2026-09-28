@@ -707,8 +707,10 @@ Never hardcode a threshold. `health()` publishes the live `readingPolicy` and
 
 Hand-written, and tied to the schema by two gates rather than by a generator:
 
-- `npm test` — offline, compares the types against a pinned
-  `schema/openapi.snapshot.json`. Answers *did we drift?*
+- `npm test` — offline, compares the types against `schema/openapi.json`, the
+  describe.net spec vendored with its sha256 in `schema/SOURCE`, and checks
+  `schema/sdk-map.json`: every public operation is called by a method or listed
+  in `fuera` with its reason. Answers *did we drift?*
 - `npm run schema:check` — re-fetches the live OpenAPI and diffs it. Answers
   *did they move?*
 

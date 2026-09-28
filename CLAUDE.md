@@ -30,8 +30,8 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, two entries |
 | `npm run smoke` | **real** call to the live API. FREE routes only. Needs `npm run build` first |
-| `npm run schema:check` | re-fetch the live OpenAPI, diff against the snapshot |
-| `npm run schema:refresh` | write the new snapshot (then run the tests) |
+| `npm run schema:check` | re-fetch the live OpenAPI, diff against the vendored `schema/openapi.json`, ignoring what `schema/sdk.overlay.yaml` hides |
+| `npm run schema:refresh` | re-vendor `schema/` from a describe-net checkout (`DESCRIBE_NET_DIR`, `DESCRIBE_NET_REF`), then run the tests |
 
 One test file: `npx vitest run src/client.test.ts`.
 

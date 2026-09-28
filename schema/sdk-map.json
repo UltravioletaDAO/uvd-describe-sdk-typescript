@@ -1,0 +1,29 @@
+{
+  "$comment": "Operation -> public DescribeClient method that calls it (mapeadas), or -> why no method does (fuera). Every operation the overlay does not hide appears in exactly one. src/sdk-map.test.ts enforces it.",
+  "mapeadas": {
+    "GET /health": "health",
+    "GET /leaderboard": "leaderboard",
+    "GET /wallets/{wallet}/chains": "wallet",
+    "GET /reputation/wallet/{wallet}": "walletBreakdown",
+    "GET /reputation/agent/{network}/{agent_id}": "agent"
+  },
+  "fuera": {
+    "GET /names/resolve": "pendiente: par TS de DUP-01",
+    "GET /names/reverse": "pendiente: par TS de DUP-01",
+    "GET /badge/{wallet}.svg": "badgeUrl() sólo arma la URL (sin llamada); src/sdk-map.test.ts comprueba que cae en esta ruta",
+    "GET /pricing": "sin método en este SDK",
+    "GET /manifesto": "sin método en este SDK",
+    "GET /leaderboard/page": "sin método en este SDK",
+    "GET /feed": "sin método en este SDK",
+    "GET /search/{q}": "sin método en este SDK",
+    "GET /categories": "sin método en este SDK",
+    "GET /stats/types": "sin método en este SDK",
+    "GET /stats/facets": "sin método en este SDK",
+    "GET /stats/issuers": "sin método en este SDK",
+    "GET /chains": "sin método en este SDK",
+    "GET /chains/{network}": "sin método en este SDK",
+    "GET /wallets/{wallet}/exists": "sin método en este SDK",
+    "GET /reputation/wallet/{wallet}/history": "sin método en este SDK",
+    "GET /reputation/rater/{wallet}": "sin método en este SDK"
+  }
+}
