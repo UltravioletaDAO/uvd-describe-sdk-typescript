@@ -25,10 +25,10 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **324 tests** on 2026-09-30 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 76, and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
-| `npm run build` | tsup → cjs + esm + dts, two entries |
+| `npm run build` | tsup → cjs + esm + dts, four entries (`index`, `x402/index`, `partner/index`, `widget/index`; this row said "two" until 0.5.0) |
 | `npm run smoke` | **real** call to the live API. FREE routes only. Needs `npm run build` first |
 | `npm run schema:check` | re-fetch the live OpenAPI, diff against the vendored `schema/openapi.json`, ignoring what `schema/sdk.overlay.yaml` hides |
 | `npm run schema:refresh` | re-vendor `schema/` from a describe-net checkout (`DESCRIBE_NET_DIR`, `DESCRIBE_NET_REF`), then run the tests |
@@ -66,6 +66,10 @@ pay, deliberately.
   partner/index.ts  does NOT pay: signs ERC-8128 as an allowlisted wallet. The
                     ONE entry with a real runtime import, and it is exactly
                     `uvd-x402-sdk/erc8128` — asserted in CI, not promised.
+  widget/index.ts   <describe-score>, 0.5.0. DRAWS a score the host already
+                    read; no network. card.ts (pure model) → element.ts (the
+                    custom element) + theme.ts (tokens → CSS). Bundles format +
+                    config, imports nothing at runtime.
 ```
 
 ### Who owns what
@@ -83,6 +87,9 @@ pay, deliberately.
 | `parse.ts` | Wire JSON → typed. The only place a `null` could be lost, so it is the place to look when one is |
 | `client.ts` | HTTP, timeouts, fail-open, the 402 dance, the treasury check |
 | `x402/index.ts` | The payer adapter. Type-only import — nothing at runtime |
+| `widget/card.ts` | WHAT the score card shows: the score parse (`null` is never `0`, and `Number('')` is `0`), the link rule, the rows, the three languages, the untranslated credit. Pure — no DOM, no clock |
+| `widget/theme.ts` | describe.net's tokens, written once, and the CSS derived from them. `theme.test.ts` computes their contrast |
+| `widget/element.ts` | `<describe-score>`: painting, open/close (hover, focus, `Escape`), the viewport clamp. Its class is built inside `defineDescribeScore()` because `extends HTMLElement` at module scope throws in Node |
 | `partner/index.ts` | The partner rail: chain id, nonce, and a forward to `uvd-x402-sdk`'s ERC-8128 signer. **Zero cryptography of its own**, and the only guard it adds is the private-key shape check, which exists because ethers leaks an unredacted key on the malformed-input path (measured — read the docstring) |
 
 ## Invariants — breaking any of these is the bug this package exists to prevent
@@ -152,7 +159,9 @@ pay, deliberately.
    the check did **not** get an exemption for it: `partner/index` declares
    `['uvd-x402-sdk/erc8128']` and CI fails both if something else appears there
    AND if that import disappears, which is what `external` breaking and the
-   dependency getting bundled would look like.
+   dependency getting bundled would look like. `widget/index` (0.5.0) declares
+   `[]`: it runs in the host's page, and KarmaKadabra has no bundler to resolve
+   an import there.
 8. **A 404 never reaches a caller as an exception — on the FREE routes.**
    ⚠️ Corrected 2026-08-30; the old text read *"A 404 never reaches a caller as
    an exception. `DescribeNotFound` is not exported from `index.ts` for exactly
@@ -288,6 +297,31 @@ validated, because `describe-net/scripts/build_lambda_zip.py:64` stamps
 `sha + ("-dirty" if sucio else "")` and a legitimate deploy can publish
 `<40 hex>-dirty`. Before adding a field to the checked set, ask what its
 WEIRDEST legitimate value looks like — not what its normal one does.
+
+**🔴 React 18 writes `className` on a custom element as the attribute
+`classname`.** Measured 2026-09-30 with react-dom 18.3.1 over happy-dom:
+`<describe-score className="text-sm">` renders `classname="text-sm"`, which no
+Tailwind rule matches — the number silently loses the host's styling. React
+19.2.0 renders `class`. Execution Market is on React 18, MeshRelay on 19. The
+README's JSX declaration omits `className`, so on React 18 the mistake is a
+compile error (checked against `@types/react` 18.3.3 and 19.2.5 with
+`@ts-expect-error` lines that would fail if it were accepted).
+What separates it from its neighbour: `score={null}` behaves the SAME in both
+versions (the attribute is removed → "no data"), so a React-19-only test of the
+null path proves nothing about `className`.
+
+**A `<slot>` fallback does not render next to a whitespace child.** Measured in
+Chromium: `<describe-score score="83">⏎   </describe-score>` assigns one text
+node to the slot and the fallback measures 0 px — the face would be empty. So
+`element.ts` keeps the formatted score as a SIBLING of the slot and hides it
+only when a child with content is slotted. The test that mounts that state is
+named `MOUNTS THE BAD STATE`.
+
+**`.mjs` served as `text/plain` renders nothing, silently.** Python's
+`http.server` on Windows guesses `text/plain` for `.mjs` (`mimetypes.guess_type`
+reads the registry); the browser refuses the module and the page shows no score
+at all, only a console error. Any host that vendors `dist/widget/index.mjs` has
+to check the `Content-Type` it serves.
 
 **`/leaderboard` takes no parameters.** `?limit=2` answers **422**
 `leaderboard_takes_no_params`. Paging is the metered `/leaderboard/page`.

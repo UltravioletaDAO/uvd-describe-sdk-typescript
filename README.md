@@ -17,6 +17,10 @@ subpaths so a free-only consumer installs neither:
   each request instead and read the metered routes for free
   (`uvd-describe-sdk/partner`, see [the partner rail](#not-paying-the-partner-rail)).
 
+And to **draw** a score once you have it, `uvd-describe-sdk/widget` is
+`<describe-score>`: the number, its credit and its card, one component for every
+surface. It makes no network call. See [Widget](#widget-describe-score).
+
 ---
 
 ## Sixty seconds
@@ -511,6 +515,226 @@ server already knows which is which. Measured cost of signing everything:
 
 ---
 
+## Widget: `<describe-score>`
+
+One component for "a describe.net score, with its credit", for every surface of
+the stack. Until 0.5.0 three repos drew it three ways: Execution Market and
+MeshRelay put `Powered by describe.net` in a native `title=` (the grey box the
+operating system draws), and KarmaKadabra built a styled card. This is that card,
+with EM's link rule and credit and MeshRelay's custom face, behind its own
+subpath so that importing the root in Node never meets a DOM.
+
+![describe-score in light and dark, with and without a score, cards open](docs/widget/describe-score-demo.png)
+
+```ts
+import { defineDescribeScore } from 'uvd-describe-sdk/widget';
+
+defineDescribeScore(); // registers <describe-score>. Importing registers nothing.
+```
+
+```html
+<describe-score score="83.0" wallet="0x97cd…0996" reviews="123"
+                policy="equal-weight-per-chain@2" refreshed-at="2026-09-30T14:15:39Z"
+                lang="es"></describe-score>
+```
+
+`defineDescribeScore()` returns `false` and does nothing where there is no
+`customElements` (Node, SSR) or when the tag is already defined, so calling it
+at module scope in a server-rendered app is safe. `defineDescribeScore('my-tag')`
+registers another name.
+
+### It makes no network call, and that is why it can exist
+
+describe.net deliberately publishes no widget (`describenet/badge.py:13-18`): only
+an `<img>` + SVG, because a site that embeds a widget which *transmits* data is
+co-responsible for it, and because a `fetch` per pageview would burn a rate limit
+every consumer shares. This component does not contradict that. It fetches
+nothing, loads no image and no font, and paints only what the host already read
+through `DescribeClient`. It draws a number; it does not get one. The only URL in
+it is the link to the public profile, which the reader chooses to follow.
+
+### `null` is never `0`, here either
+
+An absent, empty or non-numeric `score` paints **"no data"** (`sin datos`,
+`sem dados`), never `0`. Pass `rep.globalScore` as it comes: React drops the
+attribute for `null` (measured on React 18.3.1 and 19.2.0), and the element
+reads an absent attribute as no data. It does not use `Number(attr)`, because
+`Number('')` is `0`. A real `0` is a score and paints `0`.
+
+### Attributes
+
+Every attribute is also a property that reflects it (`el.refreshedAt` ↔
+`refreshed-at`).
+
+| Attribute | What it carries | Shown as |
+|---|---|---|
+| `score` | `globalScore` | the face, written by `formatScore` (`83.0` → `83`) |
+| `wallet` | EVM or Solana base58 | link to `describe.net/agent.html?wallet=…` |
+| `query` | fallback lookup | `?q=…` when there is no wallet. With neither, **no link** |
+| `reviews` · `identities` · `chains` · `policy` | `totalReviews` · `identityCount` · `chainsWithReputation` · `policyVersion` | a row each, **only if it came** |
+| `refreshed-at` · `retrieved-at` | when describe.net refreshed it · when you read it (ISO) | a readable date (`Intl`, medium + short); unparseable → shown raw |
+| `lang` | `es` \| `en` \| `pt`, or a full tag (`es-CO`) | default: `<html lang>`, then `en`. Read at render, so a host that switches language at runtime passes it |
+| `theme` | `auto` (default) \| `light` \| `dark` | `auto` follows `prefers-color-scheme` |
+| `placement` | `bottom-start` (default) \| `bottom-end` | the card is kept inside the viewport either way |
+
+The credit (`Powered by describe.net`, and `POWERED BY DESCRIBE.NET` on the
+card) is **never translated**. It is exported as `DESCRIBE_ATTRIBUTION` for the
+one visible credit a site carries in its footer.
+
+🔴 **Tailwind `darkMode: 'class'` is invisible to a shadow root.** A media query
+cannot see a `.dark` class on `<html>`, and `:host-context()` is Chromium-only.
+A host that themes by class (Execution Market) passes `theme` itself.
+
+### The face
+
+With no children the element paints the formatted score and inherits the font
+and colour of the element, so the host's classes style the number. With
+children, the children are the face (MeshRelay's bar):
+
+```html
+<describe-score score="81.86" wallet="0x…"><span class="bar">…</span></describe-score>
+```
+
+Whitespace does not count as a child. A plain `<slot>` fallback would show
+nothing for `<describe-score score="83">⏎</describe-score>`: measured in
+Chromium, one whitespace text node is assigned to the slot and the fallback
+measures 0 px.
+
+### Styling
+
+| Custom property | Default (light / dark), from describe.net's `theme-describeme.css` |
+|---|---|
+| `--describe-score-bg` | `#ffffff` / `#1e1b2d` (`--surface-raised`). Painted with `background`, so a gradient works |
+| `--describe-score-border` | `#e2ded4` / `#2c2840` (`--border-subtle`) |
+| `--describe-score-text` | `#1a1730` / `#f2f0ea` (`--text-primary`) |
+| `--describe-score-text-secondary` | `#4a4668` / `#c3bfd4` (`--text-secondary`) |
+| `--describe-score-accent` | `#332c86` / `#a9a2ff` (`--accent`) |
+| `--describe-score-radius` | `0.375rem` (`--radius-surface`) |
+| `--describe-score-shadow` | `--shadow-overlay` |
+| `--describe-score-font` | the system sans stack. The card never inherits the number's font |
+
+The contrast of every default text colour against its background is computed
+in the tests (WCAG AA, both themes). Parts: `::part(link)`, `::part(face)`,
+`::part(card)`.
+
+```css
+/* KarmaKadabra's card, through the properties */
+describe-score {
+  --describe-score-bg: linear-gradient(160deg, #4c2f8f 0%, #3b2470 100%);
+  --describe-score-border: rgba(201, 162, 255, .34);
+  --describe-score-text: #f3efff;
+  --describe-score-text-secondary: #d9ccff;
+  --describe-score-accent: #c9a2ff;
+}
+/* Mute the NUMBER, not the element: */
+describe-score.empty::part(face) { opacity: .6; }
+```
+
+⚠️ `opacity`, `filter` and `transform` on the element itself apply to its whole
+box, **card included**. Style the number through `::part(face)`. The card is
+positioned inside the element, so an ancestor with `overflow: hidden` clips it.
+The element puts a `<style>` in its shadow root; a Content-Security-Policy whose
+`style-src` forbids inline styles would block it (none of the three hosts sends
+one as of 2026-09-30).
+
+### Accessibility (WCAG 1.4.13, 2.1.1)
+
+- The card opens on **hover and on keyboard focus**. With a link, the link is
+  the trigger; without one, the face takes `tabindex="0"`, so the card that
+  explains "no data" can still be read without a mouse.
+- The trigger's `aria-describedby` points to the card (`role="tooltip"`).
+- **Hoverable**: a transparent bridge covers the gap between number and card.
+- **Dismissible**: `Escape` closes it without moving focus. While a card is
+  open its `Escape` is consumed, so a modal behind it (EM renders scores inside
+  modals) does not close on the same keypress. While no card is open nothing
+  listens.
+- `prefers-reduced-motion` removes the transition. The card is clamped to the
+  viewport on narrow screens.
+
+### React (Execution Market, MeshRelay)
+
+Declare the element once in the host, for example `src/types/describe-score.d.ts`
+(type-checked against `@types/react` 18.3.3 and 19.2.5):
+
+```ts
+import type { HTMLAttributes } from 'react';
+
+type DescribeScoreAttributes = Omit<HTMLAttributes<HTMLElement>, 'className'> & {
+  /** React 18 writes `className` on a custom element as a literal `classname` attribute. */
+  class?: string;
+  score?: number | string | null;
+  wallet?: string | null;
+  query?: string | null;
+  reviews?: number | string | null;
+  identities?: number | string | null;
+  chains?: number | string | null;
+  policy?: string | null;
+  'refreshed-at'?: string | null;
+  'retrieved-at'?: string | null;
+  theme?: 'auto' | 'light' | 'dark';
+  placement?: 'bottom-start' | 'bottom-end';
+};
+
+declare module 'react' {
+  namespace JSX {
+    interface IntrinsicElements {
+      'describe-score': DescribeScoreAttributes;
+    }
+  }
+}
+```
+
+```tsx
+import { defineDescribeScore } from 'uvd-describe-sdk/widget';
+defineDescribeScore();
+
+<describe-score
+  class="text-sm font-semibold"
+  score={rep.globalScore}
+  wallet={rep.wallet}
+  reviews={rep.totalReviews}
+  identities={rep.identityCount}
+  policy={rep.policyVersion}
+  refreshed-at={rep.refreshedAt}
+  lang={i18n.language}
+  theme={isDark ? 'dark' : 'light'}
+/>
+```
+
+🔴 **On React 18, `className` does not work on a custom element.** Measured with
+React 18.3.1: `<describe-score className="text-sm">` renders the attribute
+`classname="text-sm"`, which no stylesheet matches. React 19 translates it to
+`class`. The declaration above leaves `className` out so the React 18 mistake is
+a compile error; on React 19 (MeshRelay) you may drop the `Omit`.
+
+### HTML without a bundler (KarmaKadabra)
+
+`dist/widget/index.mjs` imports nothing (asserted in CI), so it vendors as one file:
+
+```html
+<script type="module">
+  import { defineDescribeScore } from '/vendor/uvd-describe-sdk/widget.mjs';
+  defineDescribeScore();
+</script>
+```
+
+⚠️ **The server must send `.mjs` as `text/javascript`.** A module served as
+`text/plain` is refused by the browser and nothing renders. Measured: Python's
+`http.server` on Windows guesses `text/plain` for `.mjs`. Check the
+`Content-Type` your server or bucket gives the file, or vendor it as `.js`.
+
+### Painting it yourself
+
+`buildDescribeScoreCard(data, lang)` returns what the card shows (`face`,
+`title`, `seal`, `text`, `rows`, `href`, `hasScore`, `openHint`) with no DOM and
+no network. Use it to test a surface in Node, or to draw the same card where a
+custom element cannot run.
+
+Demo, no network: `npm run build`, serve the repo root (`npx serve .`), open
+`/examples/widget.html` (add `?pin` to open every card at once).
+
+---
+
 ## Jitter, on by default
 
 Every request waits a random `[0, 400)` ms first. **That is on unless you turn
@@ -728,7 +952,7 @@ cycle.
 
 ```bash
 npm install
-npm test              # offline, no network. 227 tests on 2026-09-15
+npm test              # offline, no network. 324 tests on 2026-09-30 (227 on 2026-09-15)
 npm run typecheck
 npm run lint
 npm run build

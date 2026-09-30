@@ -1,0 +1,119 @@
+<!doctype html>
+<!--
+  Local demo of <describe-score> (uvd-describe-sdk/widget). No network: it loads
+  the built module from ../dist and nothing else — no font, no image, no CDN.
+
+    npm run build
+    npx serve .                       # from the repo root
+    open http://localhost:3000/examples/widget.html
+    open http://localhost:3000/examples/widget.html?pin   # every card open, for a screenshot
+
+  ⚠️ `python -m http.server` works only where Python maps `.mjs` to JavaScript.
+  On Windows it serves `text/plain` (measured 2026-09-30), the browser refuses
+  the module, and the page shows the labels with no score at all.
+
+  `?pin` opens every card by setting the same attribute hover/focus sets. It is
+  a demo convenience, not an API.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>describe-score demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #eeebe3; color: #1a1730; }
+  header { padding: 16px 24px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; color: #4a4668; font-size: 13px; }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  section { padding: 16px 24px 24px; }
+  section.light { background: #f8f6f2; color: #1a1730; }
+  section.dark { background: #141220; color: #f2f0ea; }
+  section h2 { margin: 0 0 12px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; opacity: .75; }
+  .case { min-height: 340px; }
+  .case .label { font-size: 12px; opacity: .7; margin-bottom: 4px; }
+  .big { font: 700 26px/1 ui-monospace, Menlo, Consolas, monospace; }
+  .light .big { color: #332c86; }
+  .dark .big { color: #a9a2ff; }
+  /* Muted through ::part(face): opacity on the element itself would fade the card too. */
+  .muted { font-size: 18px; }
+  .muted::part(face) { opacity: .6; }
+  .bar { display: inline-flex; align-items: center; gap: 8px; font: 12px ui-monospace, Menlo, monospace; }
+  .bar > span:first-child { width: 60px; height: 6px; border-radius: 3px; background: rgb(127 127 127 / .35); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: currentColor; }
+  .kk { --describe-score-bg: linear-gradient(160deg, #4c2f8f 0%, #3b2470 100%);
+        --describe-score-border: rgba(201,162,255,.34); --describe-score-text: #f3efff;
+        --describe-score-text-secondary: #d9ccff; --describe-score-accent: #c9a2ff;
+        --describe-score-radius: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>&lt;describe-score&gt;</h1>
+  <p>uvd-describe-sdk/widget · pasa el mouse o navega con Tab · Escape cierra la tarjeta</p>
+</header>
+<main>
+  <section class="light">
+    <h2>light · con dato</h2>
+    <div class="case">
+      <div class="label">score="83.0" + wallet + todas las filas</div>
+      <describe-score class="big" theme="light" score="83.0"
+        wallet="0x97cd0bd8a3ccad6b1e3b8f3a0a3e6f2b7e2b0996"
+        reviews="123" identities="2" chains="3" policy="rp-2026-09-14"
+        refreshed-at="2026-09-30T14:15:39.070989Z" retrieved-at="2026-09-30T14:20:00Z">
+      </describe-score>
+    </div>
+  </section>
+  <section class="light">
+    <h2>light · sin dato</h2>
+    <div class="case">
+      <div class="label">score="" · sin wallet ni query → sin link, cara con tabindex</div>
+      <describe-score class="big muted" theme="light" score=""></describe-score>
+    </div>
+  </section>
+  <section class="dark">
+    <h2>dark · con dato</h2>
+    <div class="case">
+      <div class="label">score="86.653045" + query (sin wallet → ?q=)</div>
+      <describe-score class="big" theme="dark" score="86.653045" query="agent 7"
+        reviews="41" policy="rp-2026-09-14" refreshed-at="not-a-date"></describe-score>
+    </div>
+  </section>
+  <section class="dark">
+    <h2>dark · sin dato</h2>
+    <div class="case">
+      <div class="label">sin score, con wallet (lang="pt")</div>
+      <describe-score class="big muted" theme="dark" lang="pt"
+        wallet="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"></describe-score>
+    </div>
+  </section>
+  <section class="light">
+    <h2>light · cara propia (barra de MeshRelay)</h2>
+    <div class="case">
+      <div class="label">hijos = la cara · lang="en"</div>
+      <describe-score theme="light" lang="en" score="81.86" reviews="9"
+        wallet="0x97cd0bd8a3ccad6b1e3b8f3a0a3e6f2b7e2b0996"><span class="bar"><span><i style="width:81.86%"></i></span><span>81.86</span></span></describe-score>
+    </div>
+  </section>
+  <section class="dark">
+    <h2>dark · tokens de KarmaKadabra · bottom-end</h2>
+    <div class="case" style="text-align:right">
+      <div class="label">--describe-score-bg = degradado · placement="bottom-end"</div>
+      <describe-score class="big kk" theme="dark" placement="bottom-end" score="92.4"
+        wallet="0x97cd0bd8a3ccad6b1e3b8f3a0a3e6f2b7e2b0996" reviews="300" identities="8"
+        policy="rp-2026-09-14"></describe-score>
+    </div>
+  </section>
+</main>
+<script type="module">
+  import { defineDescribeScore } from '../dist/widget/index.mjs';
+  defineDescribeScore();
+  if (new URLSearchParams(location.search).has('pin')) {
+    for (const el of document.querySelectorAll('describe-score')) {
+      el.shadowRoot.querySelector('[part="card"]').toggleAttribute('data-open', true);
+    }
+  }
+</script>
+</body>
+</html>
