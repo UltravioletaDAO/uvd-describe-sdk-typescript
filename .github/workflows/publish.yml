@@ -4,8 +4,9 @@ name: Publish to npm
 # runs by itself on a push, a tag, a release or a merge.
 # Trusted publishing (OIDC): npm trades this job's OIDC token for a short-lived publish credential,
 # so there is no npm token for this repository to hold. Only the `publish` job gets `id-token`, and
-# it waits in the `npm` environment until a reviewer approves it under "Review deployments".
-# src/publish-workflow.test.ts fails if any of that stops being true.
+# it runs in the `npm` environment. src/publish-workflow.test.ts fails if any of that stops being
+# true. No reviewer approves a run: what gates a publish is main (the `check` job here, step 1 on
+# GitHub), the manual dispatch and OIDC with no token.
 #
 # ⚠️ Corrected 2026-09-30: this header used to say the package was not on npm and no token was set.
 # Both were false. 0.1.0, 0.2.0, 0.3.0 and 0.4.1 went out from this file, each on a v* tag, with a
@@ -13,9 +14,9 @@ name: Publish to npm
 #
 # Left to the owner, on GitHub and npmjs.com, never from a PR. Until step 3 exists, a dispatch fails
 # at Publish and nothing is published, which is the point.
-#   1. Environment `npm`: required reviewer UltravioletaDAO, prevent self-review, deployments from
-#      main only, no bypass. Create it before the first dispatch; otherwise GitHub creates it on the
-#      fly, with no reviewer.
+#   1. Environment `npm`: deployments from main only, no bypass, no required reviewer. Create it
+#      before the first dispatch; otherwise GitHub creates it on the fly with no protection rules,
+#      open to every branch.
 #   2. A ruleset on main.
 #   3. `npm trust` for uvd-describe-sdk: UltravioletaDAO/uvd-describe-sdk-typescript, publish.yml,
 #      environment npm, with token publishing disallowed.

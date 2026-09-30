@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * publish.yml releases uvd-describe-sdk by npm trusted publishing (OIDC): no token, run by hand
- * only, only from main, and every run waits for the owner's approval in the `npm` environment.
+ * only, only from main, and only the job that publishes gets `id-token` and runs in the `npm`
+ * environment.
  *
  * Each of those is one YAML line away from being undone, and the undone state is not
  * hypothetical: every version on npm before this test (0.1.0, 0.2.0, 0.3.0, 0.4.1) went out from
@@ -189,7 +190,7 @@ function publishWorkflowViolations(source: string): string[] {
   return violations;
 }
 
-describe('publish.yml: trusted publishing, run by hand from main, approved by the owner', () => {
+describe('publish.yml: trusted publishing, run by hand from main, in the npm environment', () => {
   const source = readFileSync(
     fileURLToPath(new URL('../.github/workflows/publish.yml', import.meta.url)),
     'utf8'
@@ -199,8 +200,8 @@ describe('publish.yml: trusted publishing, run by hand from main, approved by th
     expect(publishWorkflowViolations(source)).toEqual([]);
   });
 
-  // MOUNTS THE BAD STATE. Each edit below is how the workflow used to publish, or a way to skip
-  // the approval. If one stops being caught, the test above proves nothing.
+  // MOUNTS THE BAD STATE. Each edit below is how the workflow used to publish, or a way around
+  // one of its gates. If one stops being caught, the test above proves nothing.
   const mutations: Array<[string, (s: string) => string, string]> = [
     [
       'the npm token back',
@@ -222,7 +223,7 @@ describe('publish.yml: trusted publishing, run by hand from main, approved by th
     ],
     ['a push on v* tags', (s) => s.replace(/^on:\n/m, "on:\n  push:\n    tags:\n      - 'v*'\n"), 'trigger push'],
     ['a push on main, no tag at all', (s) => s.replace(/^on:\n/m, 'on:\n  push:\n    branches:\n      - main\n'), 'trigger push'],
-    ['no approval environment', (s) => s.replace('    environment: npm\n', ''), 'has no environment: npm'],
+    ['no npm environment', (s) => s.replace('    environment: npm\n', ''), 'has no environment: npm'],
     [
       'id-token for the whole workflow',
       (s) => s.replace(/^permissions:\n/m, 'permissions:\n  id-token: write\n'),

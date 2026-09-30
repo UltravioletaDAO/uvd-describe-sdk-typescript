@@ -344,7 +344,7 @@ to check the `Content-Type` it serves.
 - **Never `git add -A`** — stage by file.
 - **A version bump gets its `CHANGELOG.md` entry** (the file starts at 0.4.0),
   and never a publish: publishing is a manual `workflow_dispatch` of
-  `publish.yml` on `main`, approved by the owner in the `npm` environment.
+  `publish.yml` on `main`, in the `npm` environment, with no reviewer.
   ⚠️ Until 2026-09-30 this read *"publishing is a `vX.Y.Z` tag, pushed by
   whoever releases"*. Since DN-PUB-01 a tag on a commit that carries this
   `publish.yml` triggers nothing; older revisions of the file keep their old
@@ -387,7 +387,7 @@ publish.yml`: four runs, all `push`, all `success`). The chance to set up
 trusted publishing before a token existed was missed.
 
 Since DN-PUB-01, `publish.yml` is trusted publishing (OIDC), run by hand on
-`main`, approved by the owner in the `npm` environment; its header lists the
+`main` in the `npm` environment, with no reviewer; its header lists the
 owner's steps on GitHub and npmjs.com, and `src/publish-workflow.test.ts` keeps
 it that way.
 
