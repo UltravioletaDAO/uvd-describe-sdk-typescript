@@ -1,6 +1,6 @@
 {
   "name": "uvd-describe-sdk",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Read reputation from describe.net — the ERC-8004 index across 11 chains. Free lookups need no dependency; metered lookups pay their 402 through uvd-x402-sdk, or read free over the ERC-8128 partner rail. null is never 0.",
   "author": "Ultravioleta DAO <ultravioletadao@gmail.com>",
   "license": "MIT",
@@ -38,6 +38,11 @@
       "types": "./dist/partner/index.d.ts",
       "import": "./dist/partner/index.mjs",
       "require": "./dist/partner/index.js"
+    },
+    "./widget": {
+      "types": "./dist/widget/index.d.ts",
+      "import": "./dist/widget/index.mjs",
+      "require": "./dist/widget/index.js"
     }
   },
   "typesVersions": {
@@ -47,6 +52,9 @@
       ],
       "partner": [
         "./dist/partner/index.d.ts"
+      ],
+      "widget": [
+        "./dist/widget/index.d.ts"
       ]
     }
   },
@@ -85,6 +93,7 @@
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "ethers": "^6.17.0",
+    "happy-dom": "^20.14.5",
     "rimraf": "^6.0.0",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",

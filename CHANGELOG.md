@@ -7,9 +7,68 @@ never by the change that bumps the number.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
-## Unreleased (FG-DN-03, no version bump)
+## 0.5.0 — 2026-09-30 (not published yet)
 
-### Changed
+### Added — `uvd-describe-sdk/widget`
+
+One component for "a describe.net score, with its credit", for every surface of
+the stack (WDG-01). Execution Market and MeshRelay showed the credit as a native
+`title=` tooltip; KarmaKadabra had built the one styled card. The subpath takes
+the card from KarmaKadabra, the link rule and the untranslated credit from
+Execution Market, and the custom face from MeshRelay.
+
+- **`<describe-score>`**, a custom element with a shadow root, registered only by
+  `defineDescribeScore(tagName = 'describe-score')`. It returns `false` and does
+  nothing without `customElements` (Node, SSR) or when the tag is taken.
+  Importing the subpath registers nothing and touches no `document`.
+- Attributes, each reflected as a property: `score`, `wallet`, `query`,
+  `reviews`, `identities`, `chains`, `policy`, `refreshed-at`, `retrieved-at`,
+  `lang` (`es` / `en` / `pt`), `theme` (`auto` / `light` / `dark`), `placement`
+  (`bottom-start` / `bottom-end`).
+- **`buildDescribeScoreCard(data, lang)`**, the pure model the element paints,
+  for tests and for painting the card by hand. Types `DescribeScoreData`,
+  `DescribeScoreCard`, `DescribeScoreCardRow`, `DescribeScoreLang`,
+  `DescribeScoreElement`, and `DESCRIBE_ATTRIBUTION`.
+- Theme through `--describe-score-*` custom properties, defaulting to
+  describe.net's own tokens in both themes; `::part(link)`, `::part(face)`,
+  `::part(card)`.
+- `examples/widget.html`, a local demo with no network.
+
+### Rules it keeps
+
+- An absent, empty or non-decimal score paints "no data", never `0`
+  (`Number('')` is `0`, so the element does not use it).
+- No network: no `fetch`, no remote image or font. It paints only what the host
+  holds, which is why it does not contradict describe.net publishing no widget
+  (`describenet/badge.py:13-18`).
+- No `innerHTML`: every host string lands through `textContent` or an attribute.
+- Zero runtime dependencies. `widget/index` joins the CI check with the empty
+  set.
+
+### Measured while building it (details in the README)
+
+- React 18.3.1 renders `className` on a custom element as a literal `classname`
+  attribute. React 19.2.0 translates it. The README's JSX declaration omits
+  `className` so the mistake does not compile.
+- A `<slot>` fallback does not render when the only child is whitespace
+  (Chromium: one assigned text node, fallback 0 px wide).
+- Python's `http.server` on Windows serves `.mjs` as `text/plain`, and the
+  browser refuses the module.
+- The first viewport clamp measured the card during a `transform` transition
+  and let it overflow by 7 px from the second opening on; the shift now lives
+  in the untransitioned `translate` property.
+
+### Dev only
+
+- `happy-dom` (devDependency) for the DOM tests.
+- `package-lock.json` said `0.1.0` in its own `version` field; it now matches.
+
+### Also in this version: FG-DN-03, landed on `main` before this bump
+
+Listed here as *Unreleased (FG-DN-03, no version bump)* until 0.5.0; it ships
+in 0.5.0.
+
+#### Changed
 
 - **`schema/` is describe.net's committed spec, vendored.** `schema/openapi.json`
   and `schema/sdk.overlay.yaml` (Overlay 1.0.0) are byte-for-byte copies from
@@ -25,7 +84,7 @@ commits, so they are shorter than they deserve — `git log` has the measurement
   hand-written list had 8), and the operations the overlay hides (web app,
   `/mcp`, `/a2a`) no longer count.
 
-### Unchanged, on purpose
+#### Unchanged, on purpose
 
 - The client, its types and its parsers. `/names/resolve` and `/names/reverse`
   are in `fuera`, not implemented.

@@ -49,11 +49,15 @@ jobs:
       # landing there (ethers, or a bundled copy of the SDK) fails as loudly as
       # one landing in `index`, and so does the import DISAPPEARING, which is
       # what bundling the dependency instead of externalising it looks like.
+      #
+      # `widget/index` (0.5.0, 2026-09-30) declares the empty set: it runs in
+      # the host's page, so a runtime import there would be a dependency every
+      # host has to vendor — KarmaKadabra has no bundler to resolve it.
       - name: Each built entry imports exactly what it is allowed to
         run: |
           node -e "
           const {readFileSync}=require('fs');
-          const ALLOWED={'index':[],'x402/index':[],'partner/index':['uvd-x402-sdk/erc8128']};
+          const ALLOWED={'index':[],'x402/index':[],'partner/index':['uvd-x402-sdk/erc8128'],'widget/index':[]};
           let bad=false;
           for (const [entry, allowed] of Object.entries(ALLOWED)) {
             const cjs=[...readFileSync('dist/'+entry+'.js','utf8').matchAll(/require\(['\"]([^'\"]+)['\"]\)/g)].map(m=>m[1]);
