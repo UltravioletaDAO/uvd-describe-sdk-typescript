@@ -343,7 +343,13 @@ to check the `Content-Type` it serves.
   `Co-Authored-By: Claude <noreply@anthropic.com>`.
 - **Never `git add -A`** — stage by file.
 - **A version bump gets its `CHANGELOG.md` entry** (the file starts at 0.4.0),
-  and never a tag: publishing is a `vX.Y.Z` tag, pushed by whoever releases.
+  and never a publish: publishing is a manual `workflow_dispatch` of
+  `publish.yml` on `main`, in the `npm` environment, with no reviewer.
+  ⚠️ Until 2026-09-30 this read *"publishing is a `vX.Y.Z` tag, pushed by
+  whoever releases"*. Since DN-PUB-01 a tag on a commit that carries this
+  `publish.yml` triggers nothing; older revisions of the file keep their old
+  triggers and the stored token until the owner completes steps 3 and 4 of its
+  header.
 - **Never hardcode a private key**, not even in an example. `process.env` only.
 - A test that proves nothing unless it can go red is not a test: mount the bad
   state and confirm. Several tests here are named `MOUNTS THE BAD STATE` and
@@ -371,14 +377,26 @@ to check the `Content-Type` it serves.
 - **Whether the three consumers will adopt this.** They work today against the
   raw API. Nobody has asked them.
 
-## What is NOT published
+## How this is published
 
-As of 2026-08-30: nothing. No GitHub repo, no npm package, no tag. The publish
-workflow is prepared and unarmed. Saul gives that go-ahead separately.
+⚠️ **Corrected 2026-09-30 (DN-PUB-01), and the old section is left below
+because it is what the old `publish.yml` header said too.** 0.1.0, 0.2.0,
+0.3.0 and 0.4.1 are on npm, each published by `publish.yml` on the push of its
+`v*` tag with a long-lived token stored in the repository (`gh run list -w
+publish.yml`: four runs, all `push`, all `success`). The chance to set up
+trusted publishing before a token existed was missed.
 
-If you get there: this package has **never** been published, which makes it the
+Since DN-PUB-01, `publish.yml` is trusted publishing (OIDC), run by hand on
+`main` in the `npm` environment, with no reviewer; its header lists the
+owner's steps on GitHub and npmjs.com, and `src/publish-workflow.test.ts` keeps
+it that way.
+
+~~As of 2026-08-30: nothing. No GitHub repo, no npm package, no tag. The publish
+workflow is prepared and unarmed. Saul gives that go-ahead separately.~~
+
+~~If you get there: this package has **never** been published, which makes it the
 one moment where npm trusted publishing (OIDC, no stored token) can be set up
 *before* a long-lived token ever exists. Read the comment in
 `.github/workflows/publish.yml` — the sibling Python repo carries a comment
 claiming it uses OIDC while its code passes a token, and that mistake should not
-be inherited a third time.
+be inherited a third time.~~
