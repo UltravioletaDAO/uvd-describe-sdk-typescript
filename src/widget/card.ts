@@ -28,8 +28,9 @@
  *   * **A row appears only if its datum came** (KK's `fila()`). A `0` came; an
  *     empty string did not.
  *   * **A date that does not parse is shown raw** (KK's `_fecha()`): inventing a
- *     date would be worse than showing an ugly one.
- *   * **No destination is invented** (EM `AttributedScore.tsx:53-58`): a wallet
+ *     date would be worse than showing an ugly one. And "parses" means ISO 8601
+ *     with a time — `new Date()` alone reads `"Version 2"` as a day in 2001.
+ *   * **No destination is invented** (EM `AttributedScore.tsx:52-58`): a wallet
  *     links to `?wallet=`, else a query to `?q=`, else there is no link.
  *   * **The credit is never translated** (EM `AttributedScore.tsx:15`).
  */
@@ -197,8 +198,23 @@ export function resolveLang(tag: string | null | undefined): {
   }
 }
 
-/** Readable date, or the raw text when it does not parse. */
+/**
+ * A date-time as ISO 8601 writes it, time included: `2026-09-30T14:15:39.070989Z`,
+ * `…+00:00`, or with a space as Python's `str(datetime)` writes it.
+ *
+ * 🔴 `new Date()` alone is not a parser, it is a guesser (refuter's P3-1,
+ * 2026-09-30, Node 20): `"Version 2"` → Feb 1, 2001; `"12"` → Dec 1, 2001;
+ * `"abc 2020"` → Jan 1, 2020; and a bare `"2026-09-30"` is read as UTC
+ * midnight, which prints the PREVIOUS day anywhere in the Americas. Each is an
+ * invented date, which is exactly what the raw fallback exists to avoid. So a
+ * string reaches `new Date()` only if it has this shape; with no offset it is
+ * local time both ways, so the digits come back as written.
+ */
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/i;
+
+/** Readable date, or the raw text when it is not an ISO date-time or does not parse. */
 function readableDate(raw: string, locale: string): string {
+  if (!ISO_DATE_TIME.test(raw)) return raw;
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return raw;
   try {
@@ -208,15 +224,38 @@ function readableDate(raw: string, locale: string): string {
   }
 }
 
-/** `https://describe.net/agent.html?wallet=…`, `?q=…`, or `null`. */
+/**
+ * One profile URL, or `null` when the value cannot be put in a URL.
+ *
+ * `encodeURIComponent` THROWS (`URIError: URI malformed`) on a lone surrogate —
+ * a name truncated in the middle of an emoji is enough. Uncaught, it aborted
+ * the render before the face was written and the score vanished (refuter's
+ * P3-2, 2026-09-30; inherited from EM `AttributedScore.tsx:46-48`, where it
+ * takes the React tree down). A value that cannot be linked gets no link.
+ */
+function profileHref(param: 'wallet' | 'q', value: string): string | null {
+  try {
+    return `${DEFAULT_SITE_URL}/agent.html?${param}=${encodeURIComponent(value)}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `https://describe.net/agent.html?wallet=…`, `?q=…`, or `null`.
+ *
+ * A wallet that is present but cannot be encoded yields `null` — it does NOT
+ * fall back to the query: the host said which subject this is, and linking a
+ * different lookup would be inventing a destination.
+ */
 export function describeProfileHref(
   wallet: string | null | undefined,
   query: string | null | undefined,
 ): string | null {
   const w = present(wallet);
-  if (w !== null) return `${DEFAULT_SITE_URL}/agent.html?wallet=${encodeURIComponent(w)}`;
+  if (w !== null) return profileHref('wallet', w);
   const q = present(query);
-  if (q !== null) return `${DEFAULT_SITE_URL}/agent.html?q=${encodeURIComponent(q)}`;
+  if (q !== null) return profileHref('q', q);
   return null;
 }
 

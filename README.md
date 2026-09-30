@@ -545,7 +545,7 @@ registers another name.
 
 ### It makes no network call, and that is why it can exist
 
-describe.net deliberately publishes no widget (`describenet/badge.py:13-18`): only
+describe.net deliberately publishes no widget (`describenet/badge.py:13-24`): only
 an `<img>` + SVG, because a site that embeds a widget which *transmits* data is
 co-responsible for it, and because a `fetch` per pageview would burn a rate limit
 every consumer shares. This component does not contradict that. It fetches
@@ -570,9 +570,9 @@ Every attribute is also a property that reflects it (`el.refreshedAt` ↔
 |---|---|---|
 | `score` | `globalScore` | the face, written by `formatScore` (`83.0` → `83`) |
 | `wallet` | EVM or Solana base58 | link to `describe.net/agent.html?wallet=…` |
-| `query` | fallback lookup | `?q=…` when there is no wallet. With neither, **no link** |
+| `query` | fallback lookup | `?q=…` when there is no wallet. With neither — or with a value that cannot be URL-encoded, such as a name cut in half an emoji — **no link** |
 | `reviews` · `identities` · `chains` · `policy` | `totalReviews` · `identityCount` · `chainsWithReputation` · `policyVersion` | a row each, **only if it came** |
-| `refreshed-at` · `retrieved-at` | when describe.net refreshed it · when you read it (ISO) | a readable date (`Intl`, medium + short); unparseable → shown raw |
+| `refreshed-at` · `retrieved-at` | when describe.net refreshed it · when you read it (ISO 8601 with a time) | a readable date (`Intl`, medium + short). Anything else is shown raw — a bare `2026-09-30` too, which `new Date()` would print as the previous day west of UTC |
 | `lang` | `es` \| `en` \| `pt`, or a full tag (`es-CO`) | default: `<html lang>`, then `en`. Read at render, so a host that switches language at runtime passes it |
 | `theme` | `auto` (default) \| `light` \| `dark` | `auto` follows `prefers-color-scheme` |
 | `placement` | `bottom-start` (default) \| `bottom-end` | the card is kept inside the viewport either way |
@@ -644,10 +644,12 @@ one as of 2026-09-30).
   explains "no data" can still be read without a mouse.
 - The trigger's `aria-describedby` points to the card (`role="tooltip"`).
 - **Hoverable**: a transparent bridge covers the gap between number and card.
-- **Dismissible**: `Escape` closes it without moving focus. While a card is
-  open its `Escape` is consumed, so a modal behind it (EM renders scores inside
-  modals) does not close on the same keypress. While no card is open nothing
-  listens.
+- **Dismissible**: `Escape` closes it without moving focus. When the card is
+  open because its trigger has keyboard focus, that `Escape` is consumed, so a
+  modal behind it (EM renders scores inside modals) does not close on the same
+  keypress. When it is open by hover alone, it closes and the `Escape` still
+  reaches the control that has focus (a textarea, a combobox). While no card is
+  open nothing listens.
 - `prefers-reduced-motion` removes the transition. The card is clamped to the
   viewport on narrow screens.
 
@@ -952,7 +954,7 @@ cycle.
 
 ```bash
 npm install
-npm test              # offline, no network. 324 tests on 2026-09-30 (227 on 2026-09-15)
+npm test              # offline, no network. 336 tests on 2026-09-30 (227 on 2026-09-15)
 npm run typecheck
 npm run lint
 npm run build

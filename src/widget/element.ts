@@ -24,10 +24,15 @@
  *     delay to survive the gap; a slow hand lost it.
  *   * **Persistent**: it stays open while hovered or focused. No timer closes it.
  *   * **Dismissible**: `Escape` closes it without moving focus or the pointer.
- *     It stays closed until the pointer re-enters or focus comes back. While a
- *     card is open, its `Escape` is consumed (`stopPropagation`, capture phase
- *     on the document): Execution Market renders scores inside modals, and one
- *     keypress must close the innermost layer, not the card AND the modal.
+ *     It stays closed until the pointer re-enters or focus comes back. The
+ *     `Escape` is CONSUMED (`stopPropagation`, capture phase on the document)
+ *     only when the card is open by keyboard focus on its trigger: then the card
+ *     is the innermost layer, and one keypress must close it, not the card AND
+ *     the modal Execution Market renders it in. Opened by hover alone, the card
+ *     closes and the key goes on: focus is on some other control (a textarea
+ *     in that same modal), and swallowing that control's `Escape` for a card
+ *     the user may not even be looking at was the refuter's P2-2 of
+ *     2026-09-30 (the first version consumed it whenever a card was open).
  *     While no card is open, no listener exists and nothing is consumed.
  *   * **The trigger names the card**: `aria-describedby` → the card's id, in
  *     the same shadow root (an id reference cannot cross a shadow boundary).
@@ -300,7 +305,10 @@ function createDescribeScoreClass(): CustomElementConstructor {
 
     #onKeydown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !this.#open) return;
-      event.stopPropagation();
+      // Consumed only when focus is on this card's trigger: then the card IS
+      // the innermost layer. Opened by hover alone, focus is somewhere else
+      // (a textarea in a modal) and that control's own Escape must arrive.
+      if (this.#focused) event.stopPropagation();
       this.#dismissed = true;
       this.#update();
     };

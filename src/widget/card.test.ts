@@ -108,6 +108,18 @@ describe('the link — never an invented destination', () => {
     expect(card.href).toContain('?wallet=');
     expect(card.openHint).toBe('Clic para abrir el perfil público');
   });
+
+  it('MOUNTS THE BAD STATE: a lone surrogate cannot be linked — no link, never a throw', () => {
+    // encodeURIComponent throws on it; uncaught, the render aborted before the
+    // face was written and the score vanished (refuter's P3-2, 2026-09-30).
+    expect(() => encodeURIComponent('\uD800')).toThrow(URIError);
+    expect(describeProfileHref('\uD800abc', null)).toBeNull();
+    expect(describeProfileHref(null, 'name \uD83D')).toBeNull();
+    // A wallet that cannot be linked does not fall back to a different lookup.
+    expect(describeProfileHref('\uD800', 'agent 7')).toBeNull();
+    const card = buildDescribeScoreCard({ score: '83', wallet: '\uD800' }, 'en');
+    expect(card).toMatchObject({ face: '83', hasScore: true, href: null, openHint: null });
+  });
 });
 
 describe('the rows — only what came', () => {
@@ -145,6 +157,35 @@ describe('the rows — only what came', () => {
     expect(refreshed.value).not.toBe(iso);
     expect(refreshed.value).toContain('2026');
     expect(retrieved).toEqual({ key: 'retrievedAt', label: 'retrieved', value: 'yesterday-ish' });
+  });
+
+  it('the readable date is EXACTLY Intl medium + short (computed the same way, so no time zone leaks in)', () => {
+    // An ISO string re-serialised passes "not the input" and "contains 2026";
+    // only the exact format pins what the brief asked for (refuter's M4).
+    const expected = (s: string, locale: string): string =>
+      new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(s));
+    const iso = '2026-09-09T17:49:39.070989Z';
+    expect(buildDescribeScoreCard({ refreshedAt: iso }, 'en').rows[0].value).toBe(expected(iso, 'en'));
+    expect(buildDescribeScoreCard({ retrievedAt: iso }, 'es-CO').rows[0].value).toBe(expected(iso, 'es-CO'));
+    const python = '2026-09-30 14:15:39.070989+00:00';
+    expect(buildDescribeScoreCard({ refreshedAt: python }, 'pt').rows[0].value).toBe(expected(python, 'pt'));
+  });
+
+  it('shaped like ISO but not a real instant (month 13, hour 25) is shown raw too', () => {
+    const raw = '2026-13-45T25:99Z';
+    expect(Number.isNaN(new Date(raw).getTime())).toBe(true);
+    expect(buildDescribeScoreCard({ refreshedAt: raw }, 'en').rows[0].value).toBe(raw);
+  });
+
+  it.each([
+    ['Version 2', 'Feb 1, 2001'],
+    ['12', 'Dec 1, 2001'],
+    ['abc 2020', 'Jan 1, 2020'],
+    ['2026-09-30', 'the previous day west of UTC'],
+  ])('MOUNTS THE BAD STATE: %j is shown raw, not guessed into %s', (raw) => {
+    // new Date() alone accepts every one of these (Node 20, refuter's P3-1).
+    expect(Number.isNaN(new Date(raw).getTime())).toBe(false);
+    expect(buildDescribeScoreCard({ refreshedAt: raw }, 'en').rows[0].value).toBe(raw);
   });
 });
 

@@ -33,6 +33,11 @@ const trigger = (node: HTMLElement): HTMLElement => (link(node) ?? face(node)) a
 const isOpen = (node: HTMLElement): boolean => card(node).hasAttribute('data-open');
 const escape = (): boolean =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+/** Escape where a real keypress lands: on the focused element, composed out of any shadow root. */
+const escapeOn = (target: EventTarget): boolean =>
+  target.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, composed: true }),
+  );
 
 describe('defineDescribeScore', () => {
   it('twice does not throw; the second call reports it had nothing to do', () => {
@@ -73,6 +78,18 @@ describe('the face — null is never 0', () => {
     expect(value(mount()).textContent).toBe('sin datos');
     document.documentElement.removeAttribute('lang');
     expect(value(mount()).textContent).toBe('no data');
+  });
+
+  it('a language switched at runtime re-renders an element that is already connected', () => {
+    // README promises "a host that switches language at runtime passes it";
+    // that only works while `lang` is an observed attribute (refuter's M2).
+    const node = mount({ lang: 'en', 'refreshed-at': 'raw', wallet: WALLET });
+    expect(node.isConnected).toBe(true);
+    expect(value(node).textContent).toBe('no data');
+    node.setAttribute('lang', 'es');
+    expect(value(node).textContent).toBe('sin datos');
+    expect(root(node).querySelector('dt')?.textContent).toBe('actualizado');
+    expect(root(node).querySelector('.open')?.textContent).toBe('Clic para abrir el perfil público ↗');
   });
 
   it('re-renders when an attribute changes, and properties reflect attributes', () => {
@@ -138,6 +155,13 @@ describe('the link', () => {
     expect(root(node).querySelector('a')).toBeNull();
     expect(face(node).getAttribute('tabindex')).toBe('0');
     expect(root(node).querySelector('.open')).toBeNull();
+  });
+
+  it('a wallet with a lone surrogate: the score still paints, with no link', () => {
+    const node = mount({ score: '83', wallet: 'name \uD83D' });
+    expect(value(node).textContent).toBe('83');
+    expect(link(node)).toBeNull();
+    expect(face(node).getAttribute('tabindex')).toBe('0');
   });
 
   it('gaining and losing the wallet swaps the trigger without duplicating the face', () => {
@@ -214,6 +238,20 @@ describe('opening and closing (WCAG 1.4.13, 2.1.1)', () => {
     expect(root(node).activeElement).toBe(trigger(node));
   });
 
+  it('after Escape, focusing the trigger again reopens the card (keyboard only, no pointer)', () => {
+    // A keyboard user who dismissed it must get it back by coming back to it;
+    // without the reset in `focusin` it stayed closed until a mouse showed up
+    // (refuter's M1).
+    const node = mount({ score: '83', wallet: WALLET });
+    trigger(node).focus();
+    escapeOn(trigger(node));
+    expect(isOpen(node)).toBe(false);
+    trigger(node).blur();
+    expect(root(node).activeElement).toBeNull();
+    trigger(node).focus();
+    expect(isOpen(node)).toBe(true);
+  });
+
   it('with no score and no link the face takes focus, so "no data" can still be read', () => {
     const node = mount();
     face(node).focus();
@@ -243,7 +281,7 @@ describe('opening and closing (WCAG 1.4.13, 2.1.1)', () => {
     expect(isOpen(node)).toBe(true);
   });
 
-  it('an open card consumes Escape (so a modal behind it stays); a closed one does not', () => {
+  it('a card open by keyboard focus consumes Escape (so a modal behind it stays); a closed one does not', () => {
     const seen: string[] = [];
     const modal = (e: KeyboardEvent): void => {
       seen.push(e.key);
@@ -251,19 +289,43 @@ describe('opening and closing (WCAG 1.4.13, 2.1.1)', () => {
     document.addEventListener('keydown', modal);
     try {
       const node = mount({ score: '83' });
-      node.dispatchEvent(new PointerEvent('pointerenter'));
-      escape();
+      trigger(node).focus();
+      expect(isOpen(node)).toBe(true);
+      escapeOn(trigger(node));
+      expect(isOpen(node)).toBe(false);
       expect(seen).toEqual([]);
-      escape();
+      escapeOn(trigger(node));
       expect(seen).toEqual(['Escape']);
     } finally {
       document.removeEventListener('keydown', modal);
     }
   });
 
+  it('a card open by hover alone closes on Escape but does NOT swallow it: the focused control gets it', () => {
+    // EM: focus in a textarea of a modal, pointer resting on a score. The
+    // first Escape used to be eaten by a card the user may not be looking at
+    // (refuter's P2-2, 2026-09-30).
+    const input = document.createElement('input');
+    document.body.append(input);
+    const seen: string[] = [];
+    input.addEventListener('keydown', (e) => {
+      seen.push(e.key);
+    });
+    const node = mount({ score: '83' });
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    node.dispatchEvent(new PointerEvent('pointerenter'));
+    expect(isOpen(node)).toBe(true);
+    escapeOn(input);
+    expect(seen).toEqual(['Escape']);
+    expect(isOpen(node)).toBe(false);
+    expect(document.activeElement).toBe(input);
+  });
+
   it('a removed element stops listening', () => {
     const node = mount({ score: '83' });
-    node.dispatchEvent(new PointerEvent('pointerenter'));
+    trigger(node).focus();
+    expect(isOpen(node)).toBe(true);
     node.remove();
     expect(isOpen(node)).toBe(false);
     const seen: string[] = [];
@@ -285,5 +347,24 @@ describe('horizontalShift — the card never leaves the viewport', () => {
     ['wider than the viewport: pin the left edge', 20, 420, 360, -12],
   ])('%s', (_label, left, right, viewport, expected) => {
     expect(horizontalShift(left, right, viewport)).toBe(expected);
+  });
+
+  it('opening the card applies the shift to the card (the wiring, not just the arithmetic)', () => {
+    // happy-dom lays nothing out: documentElement.clientWidth is 0, so without
+    // these stubs #place() returns early and a flipped sign would pass
+    // (refuter's M3). 360 - 8 - 520 = -168.
+    const node = mount({ score: '83' });
+    const html = document.documentElement;
+    Object.defineProperty(html, 'clientWidth', { configurable: true, get: () => 360 });
+    const box = { left: 200, right: 520, top: 0, bottom: 100, width: 320, height: 100, x: 200, y: 0 };
+    card(node).getBoundingClientRect = () => ({ ...box, toJSON: () => box }) as DOMRect;
+    try {
+      node.dispatchEvent(new PointerEvent('pointerenter'));
+      expect(isOpen(node)).toBe(true);
+      expect(card(node).style.getPropertyValue('--_ds-dx')).toBe('-168px');
+    } finally {
+      delete (html as unknown as Record<string, unknown>).clientWidth;
+    }
+    expect(document.documentElement.clientWidth).toBe(0);
   });
 });

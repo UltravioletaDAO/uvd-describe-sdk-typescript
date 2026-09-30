@@ -40,10 +40,18 @@ Execution Market, and the custom face from MeshRelay.
   (`Number('')` is `0`, so the element does not use it).
 - No network: no `fetch`, no remote image or font. It paints only what the host
   holds, which is why it does not contradict describe.net publishing no widget
-  (`describenet/badge.py:13-18`).
+  (`describenet/badge.py:13-24`).
 - No `innerHTML`: every host string lands through `textContent` or an attribute.
 - Zero runtime dependencies. `widget/index` joins the CI check with the empty
   set.
+- A date is formatted only when it is ISO 8601 with a time; anything else is
+  shown raw. `new Date()` alone turns `"Version 2"` into Feb 1, 2001 and a bare
+  `2026-09-30` into the previous day west of UTC.
+- A `wallet` or `query` that cannot be URL-encoded (a lone surrogate) gets no
+  link. `encodeURIComponent` throws there, and uncaught it left the face empty.
+- `Escape` always closes an open card, and is consumed only when the card is
+  open by keyboard focus on its trigger. Opened by hover alone, the key still
+  reaches the control that has focus.
 
 ### Measured while building it (details in the README)
 

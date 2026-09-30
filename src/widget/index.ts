@@ -31,7 +31,7 @@
  *
  * ## It makes no network call, and that is what allows it to exist
  *
- * describe.net deliberately publishes no widget (`describenet/badge.py:13-18`):
+ * describe.net deliberately publishes no widget (`describenet/badge.py:13-24`):
  * only an `<img>` + SVG, because a site that embeds a widget which TRANSMITS data
  * is co-responsible for it (EFF 2010, *Fashion ID*), and because a `fetch` per
  * pageview would burn their shared rate limit. This component does not
