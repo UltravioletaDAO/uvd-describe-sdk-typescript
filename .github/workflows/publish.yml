@@ -8,7 +8,8 @@ name: Publish to npm
 # src/publish-workflow.test.ts fails if any of that stops being true.
 #
 # ⚠️ Corrected 2026-09-30: this header used to say the package was not on npm and no token was set.
-# Both were false. 0.1.0 to 0.4.1 went out from this file, each on a v* tag, with a stored token.
+# Both were false. 0.1.0, 0.2.0, 0.3.0 and 0.4.1 went out from this file, each on a v* tag, with a
+# stored token.
 #
 # Left to the owner, on GitHub and npmjs.com, never from a PR. Until step 3 exists, a dispatch fails
 # at Publish and nothing is published, which is the point.

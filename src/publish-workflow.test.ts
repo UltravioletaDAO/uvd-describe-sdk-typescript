@@ -17,9 +17,12 @@ import { describe, expect, it } from 'vitest';
  * first — same parser, same rules, same mutations, plus two that name a rule on its own (a `push`
  * with no tag filter, and an npm token that does not come from `secrets`).
  *
- * The parser below reads only block-style YAML, the subset the workflow is written in. On
- * anything else (flow collections, anchors, tags, stray indentation) it throws, so a rewrite it
- * cannot read turns this suite red instead of slipping past it.
+ * The parser below reads only block-style YAML, the subset the workflow is written in. It throws
+ * on flow collections, on stray indentation, and on an anchor, alias or tag in VALUE position
+ * (`key: &a value`), so a rewrite it cannot read there turns this suite red instead of slipping
+ * past it. It does NOT throw on one written before a KEY: `&a id-token: write` parses as a key
+ * named `&a id-token`, which no rule recognises, so that line passes green. The hardening goes to
+ * the sibling first and comes here from there.
  */
 
 type Yaml = string | Yaml[] | { [key: string]: Yaml };

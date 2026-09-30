@@ -6,8 +6,11 @@ approved by the owner in the `npm` environment, and never part of the change
 that bumps the number.
 
 ⚠️ Corrected 2026-09-30 (DN-PUB-01). This read *"publishing is a `vX.Y.Z` tag,
-and the tag is pushed by whoever releases"*. That is how 0.1.0 to 0.4.1 went
-out; since DN-PUB-01 a tag triggers nothing.
+and the tag is pushed by whoever releases"*. That is how 0.1.0, 0.2.0, 0.3.0
+and 0.4.1 went out. Since DN-PUB-01 a tag on a commit that carries this
+`publish.yml` triggers nothing; older revisions of the file keep their old
+triggers and the stored token until the owner completes steps 3 and 4 of its
+header.
 
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.

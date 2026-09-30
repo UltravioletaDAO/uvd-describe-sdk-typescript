@@ -346,7 +346,10 @@ to check the `Content-Type` it serves.
   and never a publish: publishing is a manual `workflow_dispatch` of
   `publish.yml` on `main`, approved by the owner in the `npm` environment.
   ⚠️ Until 2026-09-30 this read *"publishing is a `vX.Y.Z` tag, pushed by
-  whoever releases"*; since DN-PUB-01 a tag triggers nothing.
+  whoever releases"*. Since DN-PUB-01 a tag on a commit that carries this
+  `publish.yml` triggers nothing; older revisions of the file keep their old
+  triggers and the stored token until the owner completes steps 3 and 4 of its
+  header.
 - **Never hardcode a private key**, not even in an example. `process.env` only.
 - A test that proves nothing unless it can go red is not a test: mount the bad
   state and confirm. Several tests here are named `MOUNTS THE BAD STATE` and
