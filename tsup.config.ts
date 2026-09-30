@@ -3,7 +3,7 @@ import { defineConfig } from 'tsup';
 /**
  * Same build shape as `uvd-x402-sdk-typescript` (cjs + esm + dts, no splitting).
  *
- * Three entries and not one, and that split is the whole dependency argument of
+ * Four entries and not one (three until 0.5.0), and that split is the whole dependency argument of
  * this package: `index` never imports `uvd-x402-sdk`, so a consumer that only
  * reads the free routes installs nothing beyond this package.
  *
@@ -13,6 +13,10 @@ import { defineConfig } from 'tsup';
  *     runtime — it calls its ERC-8128 signer — and that is why the partner rail
  *     lives behind its own subpath instead of inside the client. Added
  *     2026-08-30.
+ *   * `widget/index` is `<describe-score>` (added 2026-09-30, 0.5.0). It
+ *     touches the DOM, which is exactly why it is not in `index`: importing
+ *     the root in Node must never meet an `HTMLElement`. It bundles the two
+ *     modules it reuses (`format`, `config`) and imports nothing at runtime.
  *
  * All of them mark `uvd-x402-sdk` external so it is never bundled into ours:
  * vendorizing a dependency is exactly what the house forbids (D9 §"día 0":
@@ -23,6 +27,7 @@ export default defineConfig({
     index: 'src/index.ts',
     'x402/index': 'src/x402/index.ts',
     'partner/index': 'src/partner/index.ts',
+    'widget/index': 'src/widget/index.ts',
   },
   format: ['cjs', 'esm'],
   dts: true,
