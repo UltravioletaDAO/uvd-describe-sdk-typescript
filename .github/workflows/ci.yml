@@ -3,6 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+    # Exactly what the jobs below read: the tests import scripts/sdk-map.mjs and read schema/,
+    # package.json and publish.yml (src/publish-workflow.test.ts). A docs-only push runs nothing.
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'schema/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'tsup.config.ts'
+      - 'eslint.config.mjs'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/publish.yml'
   pull_request:
 
 jobs:

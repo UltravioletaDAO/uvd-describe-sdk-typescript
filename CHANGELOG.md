@@ -1,11 +1,29 @@
 # Changelog
 
 Newest first. A version listed here is a version on `main`, **not** a version on
-npm: publishing is a `vX.Y.Z` tag, and the tag is pushed by whoever releases,
-never by the change that bumps the number.
+npm: publishing is a manual run of `publish.yml` on `main` with that version,
+approved by the owner in the `npm` environment, and never part of the change
+that bumps the number.
+
+⚠️ Corrected 2026-09-30 (DN-PUB-01). This read *"publishing is a `vX.Y.Z` tag,
+and the tag is pushed by whoever releases"*. That is how 0.1.0 to 0.4.1 went
+out; since DN-PUB-01 a tag triggers nothing.
 
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
+
+## Unreleased (DN-PUB-01, no version bump)
+
+### Changed
+
+- **Publishing is trusted publishing (OIDC), by hand, from `main`** (DN-PUB-01).
+  `publish.yml` runs only on `workflow_dispatch` with a `version` input that must
+  equal `package.json`, and no longer on a `v*` tag. It holds no npm token: the
+  `publish` job, the only one with `id-token: write`, waits in the `npm`
+  environment for the owner's approval. `src/publish-workflow.test.ts` fails if
+  a token, a trigger other than the dispatch, the environment or the main-only
+  check comes back or goes away. CI on `push` now runs only when a file it reads
+  changes.
 
 ## 0.5.0 — 2026-09-30 (not published yet)
 
