@@ -2181,6 +2181,57 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(server.sends[1]).not.toBe(server.sends[0]);
   });
 
+  it('MOUNTS THE BAD STATE: a call whose free ask comes back AFTER another call held the authorization joins it as a reader — the delivery of one does not let go of the read the other is owed', async () => {
+    // Every request here waits for the test, free asks included, so `b`'s
+    // 402 can be made to arrive after `a` held and sent its authorization.
+    // Found by this round's own mutation run: without the `join` in the 402
+    // loop (mutant N18b) `b` sent the authorization uncounted, its delivery
+    // let go while `a` was still out, and `a`'s retry bought the read again.
+    const calls: Array<{ header: string | undefined; answer: (response: Response) => void }> = [];
+    const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((resolve) => {
+        calls.push({ header: ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'], answer: resolve });
+      })) as typeof fetch;
+    let approve: () => void = () => undefined;
+    const approved = new Promise<void>((resolve) => {
+      approve = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      await approved;
+      return envelope(1, validBefore);
+    });
+    const client = testClient({ fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    calls[0].answer(reply(402, CHALLENGE_402)); // `a`'s free ask
+    await flushTasks();
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks(); // `b`'s free ask is out, unanswered
+    approve();
+    await flushTasks(); // `a` held its authorization and sent it
+    expect(calls).toHaveLength(3);
+    const h = calls[2].header;
+    expect(h).toBeTruthy();
+
+    calls[1].answer(reply(402, CHALLENGE_402)); // `b`'s 402 arrives now
+    await flushTasks();
+    expect(calls[3].header).toBe(h); // `b` sent the held one — no second signature
+
+    calls[3].answer(delivered()); // `b` is delivered while `a` is still out…
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+    calls[2].answer(unconfirmed()); // …and `a` gets the 503: its read is owed
+    await caughtPaid(a.then(rethrown));
+
+    const retry = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(calls[4].header).toBe(h); // re-sent, not bought again
+    calls[4].answer(delivered());
+    expect((await retry).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+
   it("MOUNTS THE BAD STATE: when a waiter's clock and the signature land in the same turn, the waiter that was counted sends the authorization instead of giving up", async () => {
     // The clock's reaction runs first, the payer's right after it, and the
     // payer's continuation counts the waiter into `readers` before the
