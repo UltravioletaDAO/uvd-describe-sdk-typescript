@@ -49,6 +49,13 @@
  * fact. What the exception carries instead is `error.payment` (see
  * `errors.ts::PaymentAttempt`) and `failedAfterPaying()` reads it.
  *
+ * ⚠️ **"The caller can retry" was true and dangerous until 2026-11-16 (F-A2).**
+ * A retry called the method again, the method asked for a fresh 402, and the
+ * payer signed a SECOND authorization — after a 503 whose body says, in
+ * describe.net's words, *"NO firmes una autorización nueva"*. Now the client
+ * holds the authorization it sent, per resource (`#held`, below), and a retry
+ * re-sends it; `error.payment.resend` says when not to call again at all.
+ *
  * ## 🔴 The partner rail has a THIRD money rule — added 2026-08-30
  *
  * With `partner` configured (see `PartnerSigner` below and
@@ -95,6 +102,14 @@
  * `DescribeError.transient` is exported so a caller can build the policy they
  * want on a fact instead of on a string match.
  *
+ * ⚠️ On the metered routes that sentence used to end in a second payment: a
+ * policy built on `transient` re-called the method and signed again. Since
+ * 2026-11-16 the re-call re-sends the held authorization, so the policy is
+ * safe — and still no retry happens HERE. What the client does on its own is
+ * remember; what it never does is send by itself. Branch on
+ * `error.payment.resend`, wait `retryAfterSeconds`, and stop at
+ * `validBefore`: past it the next call is a new purchase.
+ *
  * ## What it DOES do without being asked, and there is exactly one — added 2026-08-30
  *
  * **It sleeps `[0, 400) ms` before the first request of every call.** That is
@@ -120,10 +135,12 @@
  */
 
 import {
+  AUTHORIZATION_EXPIRY_MARGIN_SECONDS,
   DEFAULT_BASE_URL,
   DEFAULT_JITTER_MS,
   DEFAULT_SITE_URL,
   DEFAULT_TIMEOUT_MS,
+  MAX_RETRY_AFTER_SECONDS,
   TREASURY_EVM,
   userAgent,
 } from './config';
@@ -142,6 +159,7 @@ import {
   DescribeUnreachable,
   failOpenCovers,
   type PaymentAttempt,
+  resendAfterPaying,
   type X402Challenge,
 } from './errors';
 import { looksLikeSettlementReceipt, malformedHashReport, SETTLEMENT_PENDING } from './hashes';
@@ -409,6 +427,17 @@ const URL_IN_BODY = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
  * literal `recovery.test.ts` pins against the table.
  */
 async function serverReason(response: Response): Promise<string | undefined> {
+  return reasonOf(await bodyRecord(response));
+}
+
+/**
+ * The error body as a JSON object, or `undefined` — tolerant, so a body that is
+ * not JSON never becomes a second exception on top of the one being raised.
+ * Split out of `serverReason` on 2026-11-16 because the post-payment path reads
+ * four more fields of the SAME body (`PaymentAttempt.serverError` and its
+ * neighbours), and a `Response` body can be read once.
+ */
+async function bodyRecord(response: Response): Promise<Record<string, unknown> | undefined> {
   let body: unknown;
   try {
     body = await response.json();
@@ -416,16 +445,254 @@ async function serverReason(response: Response): Promise<string | undefined> {
     return undefined;
   }
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
-  const record = body as Record<string, unknown>;
+  return body as Record<string, unknown>;
+}
+
+/**
+ * `serverReason` over a body already read. Same guards, same order — and, on
+ * the post-payment path, a third one in the same position: the `X-PAYMENT`
+ * this client just sent (`secret`) is cut out BEFORE the truncation too, for
+ * the reason the URLs are: a cut taken first could leave half a credential
+ * standing. describe.net does not echo the header today; this is the line
+ * that makes "today" not matter.
+ */
+function reasonOf(record: Record<string, unknown> | undefined, secret?: string): string | undefined {
+  if (!record) return undefined;
   const parts: string[] = [];
   for (const key of ['error', 'code', 'message'] as const) {
     const value = record[key];
     if (value !== null && value !== undefined) parts.push(`${key}=${String(value)}`);
   }
   if (parts.length === 0) return undefined;
-  let reason = parts.join(' · ').replace(URL_IN_BODY, '[url-redacted]');
+  let reason = withoutHeader(parts.join(' · ').replace(URL_IN_BODY, '[url-redacted]'), secret);
   if (reason.length > 300) reason = `${reason.slice(0, 300)}…`;
   return reason;
+}
+
+/**
+ * One server-written string field, with `reasonOf`'s guards in its order —
+ * URLs and the header out FIRST, then the cut — or `null` when the field is not
+ * a non-empty string.
+ */
+function serverText(value: unknown, max: number, secret?: string): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const redacted = withoutHeader(value.replace(URL_IN_BODY, '[url-redacted]'), secret);
+  return redacted.length > max ? `${redacted.slice(0, max)}…` : redacted;
+}
+
+/**
+ * `text` with every occurrence of the header replaced, when there is one worth
+ * scrubbing — verbatim, and in the two spellings a transport or a server most
+ * plausibly re-encodes it in: percent-encoded (a query string, a logged URL)
+ * and JSON with escaped slashes (base64 carries `/`). Exact matching is all
+ * this is; a header split, truncated or decoded by whoever echoes it is not
+ * recognisable, and the guard that covers those is that this package never
+ * echoes it itself.
+ */
+function withoutHeader(text: string, secret: string | undefined): string {
+  if (secret === undefined || secret.length < SCRUB_MIN_LENGTH) return text;
+  let out = text;
+  for (const spelling of new Set([secret, encodeURIComponent(secret), secret.split('/').join('\\/')])) {
+    out = out.split(spelling).join(HEADER_REDACTED);
+  }
+  return out;
+}
+
+/**
+ * A stand-in for a transport error that may quote the header: same `name`,
+ * `code`, `message`, `stack` and `cause` chain (five deep), each with the
+ * header cut out, and nothing else — no own properties copied, because a
+ * request-config-shaped property (`config.headers`) is exactly where an HTTP
+ * client keeps it.
+ */
+function scrubbedCause(error: unknown, secret: string, depth = 0): unknown {
+  if (!(error instanceof Error) || depth >= 5) {
+    return error instanceof Error ? undefined : withoutHeader(String(error), secret);
+  }
+  // `String()` on every field: `message` and `name` are writable and need not
+  // be strings, and a `split` that throws here would leave the transport's
+  // raw error in the caller's hands with no `payment` on it.
+  const copy = new Error(withoutHeader(String(error.message), secret), {
+    cause: error.cause === undefined ? undefined : scrubbedCause(error.cause, secret, depth + 1),
+  });
+  copy.name = String(error.name);
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' || typeof code === 'number') {
+    (copy as Error & { code?: string | number }).code = code;
+  }
+  copy.stack = typeof error.stack === 'string' ? withoutHeader(error.stack, secret) : undefined;
+  return copy;
+}
+
+/** RFC 9110 §5.6.7 IMF-fixdate, the HTTP-date form every sender must generate. */
+const IMF_FIXDATE = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/**
+ * How long the answer asks us to wait, in whole seconds, capped at
+ * `MAX_RETRY_AFTER_SECONDS` — or `null` when it names no wait.
+ *
+ * The `Retry-After` header first (RFC 9110 §10.2.3: delay-seconds, or an
+ * HTTP-date), then the body's `retry_after_seconds`, which describe.net's
+ * paywall serves next to it on every 503 (`describenet/paywall.py:2258-2271`).
+ *
+ * 🔴 The HTTP-date branch only accepts the IMF-fixdate SHAPE before it calls
+ * `Date.parse`, and that is measured, not tidy: V8's `Date.parse` takes almost
+ * anything — `Date.parse('5.5')` is a day in May 2001 (Node 20.20.2,
+ * 2026-11-16) — so a header like `5.5` would come out as a date in the past
+ * and a wait of 0 instead of "no usable header". The two obsolete HTTP-date
+ * forms (RFC 850, asctime) fall through to the body field, and an unreadable
+ * header is the same as an absent one.
+ */
+function retryAfterOf(response: Response, record: Record<string, unknown> | undefined): number | null {
+  let seconds: number | null = null;
+  const header = response.headers.get('Retry-After')?.trim();
+  if (header !== undefined && /^\d+$/.test(header)) {
+    seconds = Number(header);
+  } else if (header !== undefined && IMF_FIXDATE.test(header)) {
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) seconds = Math.max(0, Math.ceil((at - Date.now()) / 1000));
+  }
+  if (seconds === null) {
+    const fromBody = record?.retry_after_seconds;
+    if (typeof fromBody === 'number' && Number.isFinite(fromBody) && fromBody >= 0) {
+      seconds = Math.ceil(fromBody);
+    }
+  }
+  return seconds === null ? null : Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
+}
+
+/**
+ * `payload.authorization.validBefore` of a signed `X-PAYMENT`, in Unix
+ * seconds, or `null` when this client cannot read one.
+ *
+ * The header is `base64(JSON)`, and on EVM the EIP-3009 authorization rides at
+ * `payload.authorization` in BOTH x402 envelopes (v1 flat, v2 with
+ * `x402Version: 2`) — that is how `uvd-x402-sdk` 2.75.0 builds it
+ * (`encodeEVMPaymentHeader`, `validBefore = now + 300` on Base and `+ 60`
+ * elsewhere), and how describe.net's pay bar reads it back
+ * (`describe-net/site/dn-pay.js:721-731`). Read here, not asked of the payment
+ * SDK, because the main entry imports NOTHING at runtime (invariant 7), and
+ * reading a public timestamp off an envelope somebody else signed is not
+ * signing.
+ *
+ * 🔴 `null` is "I cannot tell", never "expired": a header this client cannot
+ * date is held until the SERVER releases it. Treating an unreadable date as a
+ * licence to sign again is the double payment, arriving through a parse error.
+ */
+function readEnvelope(header: string): Pick<PaymentAttempt, 'validBefore' | 'nonce' | 'network'> {
+  const none = { validBefore: null, nonce: null, network: null };
+  try {
+    const envelope = JSON.parse(atob(header.trim())) as {
+      network?: unknown;
+      payload?: { authorization?: { validBefore?: unknown; nonce?: unknown } };
+    };
+    const authorization = envelope?.payload?.authorization;
+    const raw = authorization?.validBefore;
+    const value =
+      typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    return {
+      // Above 1e11 s (year 5138) it is not seconds: a payer that stamped
+      // milliseconds. Reported as unreadable rather than as a date three
+      // thousand years out that a caller would wait for.
+      validBefore: Number.isFinite(value) && value > 0 && value < 1e11 ? value : null,
+      // The EIP-3009 nonce is a bytes32, and it is what the token contract
+      // records when the authorization executes (`AuthorizationUsed(authorizer,
+      // nonce)`, `authorizationState`): the one value that ties a transfer
+      // on-chain to THIS authorization, which a caller with many 0.01 USDC
+      // transfers to the treasury cannot do by amount (the refuter's P2-2).
+      // Public: without the signature it authorises nothing.
+      nonce:
+        typeof authorization?.nonce === 'string' && /^0x[0-9a-fA-F]{64}$/.test(authorization.nonce)
+          ? authorization.nonce
+          : null,
+      network:
+        typeof envelope?.network === 'string' && /^[\w:.-]{1,64}$/.test(envelope.network)
+          ? envelope.network
+          : null,
+    };
+  } catch {
+    return none;
+  }
+}
+
+/** What the challenge asked for, carried with the authorization it paid. */
+type PaymentTerms = Pick<PaymentAttempt, 'amount' | 'token' | 'payTo'>;
+
+/**
+ * An authorization this client signed and has not seen through, for ONE
+ * resource. Lives only in `DescribeClient.#held` — see "the held
+ * authorization" there.
+ */
+interface HeldAuthorization {
+  /** The `X-PAYMENT` value. A bearer credential until `validBefore`. */
+  readonly header: string;
+  readonly validBefore: number | null;
+  readonly nonce: string | null;
+  readonly network: string | null;
+  readonly terms: PaymentTerms;
+  /** Sends of it that have not been answered yet, by any call. */
+  inFlight: number;
+  /**
+   * How many times it has been SENT, by any call. Counted per authorization
+   * and not per call, because two concurrent calls share one: a first send
+   * answered `payment_required` says nothing about the other send of the same
+   * header that got a 503 (the refuter's P3 of 2026-11-16).
+   */
+  sent: number;
+}
+
+/** What replaces the header wherever it would otherwise be quoted. */
+const HEADER_REDACTED = '[x-payment-redacted]';
+
+/**
+ * Below this length a "header" is not an x402 envelope (a real one is a
+ * base64'd JSON of several hundred characters), and scrubbing it out of a
+ * message would mangle ordinary words instead of protecting anything.
+ */
+const SCRUB_MIN_LENGTH = 16;
+
+/**
+ * The advice half of every post-payment message, one per `resend`. Literals:
+ * nothing from the response is interpolated except the wait, which is a number
+ * this client parsed and capped.
+ */
+function adviceAfterPaying(attempt: PaymentAttempt): string {
+  switch (attempt.resend) {
+    case 'same-header': {
+      const wait =
+        attempt.retryAfterSeconds !== null ? ` after ${attempt.retryAfterSeconds} s (Retry-After)` : '';
+      if (attempt.status !== undefined && attempt.status >= 200 && attempt.status < 300) {
+        return (
+          'describe.net answered and the payment went through; only the body could not be read. Do ' +
+          'NOT sign a new authorization: calling this method again for the same resource re-sends ' +
+          'the SAME one, which describe.net serves again from its receipt, without a second ' +
+          'charge, for as long as it keeps that receipt.'
+        );
+      }
+      return (
+        'There is no verdict on that payment yet, and it may have settled: do NOT sign a new ' +
+        'authorization for it. Calling this method again for the same resource re-sends the SAME ' +
+        `one${wait}, which cannot be charged twice — also after it expires, when describe.net ` +
+        'answers from what it recorded of it. This client signs a new one only when describe.net ' +
+        'says nothing was settled.'
+      );
+    }
+    case 'reconcile':
+      return (
+        'That authorization may already have moved money, and re-sending it will not change this ' +
+        'answer: read `error.payment.nextAction` and look on-chain for the transfer to `payTo` ' +
+        'before paying for this resource again (`error.payment.nonce` on `error.payment.network` ' +
+        'is what identifies it). Calling this method again re-sends the same authorization, never ' +
+        'a new one. Only once it can no longer execute (past `error.payment.validBefore`) AND no ' +
+        'transfer of it is on-chain does `forgetAuthorization(error)` let the next call buy the ' +
+        'read again.'
+      );
+    case 'new-challenge-ok':
+      return (
+        'describe.net says nothing was settled: this client dropped that authorization, and calling ' +
+        'this method again asks for a new challenge and signs a new one.'
+      );
+  }
 }
 
 /**
@@ -462,6 +729,66 @@ export class DescribeClient {
   private readonly partnerFallsBackToPaying: boolean;
   private readonly expectedPayTo: string;
   private readonly fetchImpl: typeof fetch;
+  /**
+   * 🔴 **The held authorization — one per resource, and the ONLY place an
+   * `X-PAYMENT` header lives after it is signed.** Added 2026-11-16 (F-A2).
+   *
+   * Keyed by the request path, which is the resource describe.net charges
+   * for (`GET /reputation/wallet/0x…` — same route, same query, same bytes).
+   * Set the moment the payer returns, BEFORE the header leaves: an
+   * authorization that is in flight is held, so no branch below — present or
+   * future — can forget to hold it. Released on exactly two answers — a 2xx
+   * whose body was read (the read was delivered), and the whitelist 402 that
+   * says nothing was settled (`resendAfterPaying` → `'new-challenge-ok'`) —
+   * and by the caller, through `forgetAuthorization(error)`. Every other
+   * answer keeps it, so calling the method again re-sends it instead of
+   * signing a second one — the move describe.net asks for after a 503 and the
+   * one that cannot charge twice.
+   *
+   * ⚠️ **Never released by the clock, and the first version of this was.** It
+   * let go at `validBefore` + 15 s, on the reading "the old one can no longer
+   * execute, so a new one cannot charge twice for it". The refuter of
+   * 2026-11-16 (P1-2) measured why that is the double payment by another
+   * door: `uvd-x402-sdk` 2.75.0 stamps `validBefore = now + 60` on five of its
+   * six chains, describe.net replays a SETTLED read from its receipt for 300 to
+   * 1800 s, and so 76 s after a `500` that carried `X-Payment-Receipt` the
+   * client bought the same read a second time. An expired authorization costs
+   * nothing to re-send — it cannot execute — and describe.net's answer to it
+   * is the only evidence of what the first send did: the replay (200), the
+   * receipt of a settlement (409 `authorization_already_settled`), an
+   * authorization that may have been used (409 `authorization_spent`), or —
+   * when it never reached the paywall — `PAYMENT_VERIFICATION_FAILED`, which
+   * releases it. Signing again on the strength of a clock is what
+   * `describe-net/site/paybox.md` step 7 forbids: *"past its `validBefore` …
+   * with no transfer on-chain"* — and the second half is a check only the
+   * caller can make. That is what `forgetAuthorization()` is for.
+   *
+   * Why a `#private` field and not `error.payment`, a `private` property or a
+   * hidden key on the error: this is a bearer credential until its
+   * `validBefore` (after a connect timeout it may never have reached the
+   * server), and everything else in reach is serialised by somebody —
+   * `error.payment` is enumerable (`JSON.stringify(err)`, every structured
+   * logger), and TypeScript's `private` is a compile-time word that
+   * `JSON.stringify(client)` ignores. A `#` field is invisible to
+   * `JSON.stringify`, `Object.keys` and `util.inspect` (measured on Node
+   * 20.20.2, `showHidden: true` included). The Python twin hit the same wall
+   * from the other side — `BaseException` pickles `__dict__`, so a header on
+   * the exception travels in `pickle.dumps(exc)` (measured,
+   * `RA-refutacion.md` F-A1).
+   *
+   * Two calls for the same resource at the same time share it: the second
+   * re-sends the first one's authorization instead of buying the read again,
+   * and may meet `503 authorization_in_flight` while the first settles. A new
+   * `DescribeClient` holds nothing.
+   */
+  readonly #held = new Map<string, HeldAuthorization>();
+  /**
+   * Which held authorization each post-payment failure was about, so
+   * `forgetAuthorization(error)` can drop THAT one and never a newer one.
+   * Weak, so a dropped error frees its entry; private, so no serialisation of
+   * the error reaches it.
+   */
+  readonly #heldFor = new WeakMap<object, { path: string; authorization: HeldAuthorization }>();
 
   constructor(config: DescribeClientConfig = {}) {
     // ⚠️ REWRITTEN 2026-08-31, and the old defence is left quoted because it
@@ -590,6 +917,64 @@ export class DescribeClient {
     return `${siteUrl.replace(/\/+$/, '')}/agent.html?wallet=${encodeURIComponent(address)}`;
   }
 
+  /**
+   * Let go of the authorization a post-payment failure was about, so that the
+   * NEXT call for that resource asks for a new challenge and signs a new one.
+   *
+   * 🔴 This is how you pay a second time, so it is a decision, never a reflex,
+   * and it refuses what this client can check. describe.net's rule
+   * (`site/paybox.md`, step 7): do not sign a new authorization until the first
+   * one can no longer execute — past its `validBefore` — **and** there is no
+   * transfer of it on-chain (look for `error.payment.nonce` on
+   * `error.payment.network`: `AuthorizationUsed(authorizer, nonce)` on the token,
+   * or `authorizationState`). The second half is yours. The first half is
+   * checked here:
+   *
+   *   * `'in-flight'` — a send of that authorization has not been answered yet.
+   *     Never overridable: wait for the answer.
+   *   * `'may-still-execute'` — `validBefore` + `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`
+   *     has not passed, or `validBefore` could not be read. Pass
+   *     `{ force: true }` only when you KNOW it did not and will not execute
+   *     (it is past `validBefore` by a clock you trust, say).
+   *   * `'not-held'` — nothing is held for that failure any more: a later
+   *     answer released it, a newer authorization replaced it, or the error
+   *     did not come from this client. Pass the error this client threw, or one
+   *     that wraps it in `cause` (five levels are followed); a
+   *     `structuredClone` of it is a different object and is not recognised.
+   *   * `'forgotten'` — done; the next call signs a new one.
+   *
+   * ⚠️ If the check finds the transfer — the read was paid and lost, past
+   * describe.net's receipt window — forgetting buys a SECOND read, knowingly.
+   *
+   * Added 2026-11-16 (F-A2). A first version answered a bare `true` at any
+   * time, and the 503 message pointed at it: the refuter's round 2 had it sign
+   * again while the first authorization was 300 s from expiring and while a
+   * re-send of it was still in flight. RA's design for the Python twin clears
+   * the same state with `close()` on the whole client (`RA-refutacion.md`
+   * F-A1).
+   */
+  forgetAuthorization(
+    error: unknown,
+    options: { force?: boolean } = {},
+  ): 'forgotten' | 'not-held' | 'in-flight' | 'may-still-execute' {
+    let entry: { path: string; authorization: HeldAuthorization } | undefined;
+    let current: unknown = error;
+    for (let depth = 0; depth < 6 && entry === undefined; depth++) {
+      if (typeof current !== 'object' || current === null) break;
+      entry = this.#heldFor.get(current);
+      current = (current as { cause?: unknown }).cause;
+    }
+    if (!entry || this.#held.get(entry.path) !== entry.authorization) return 'not-held';
+    const { authorization } = entry;
+    if (authorization.inFlight > 0) return 'in-flight';
+    const executable =
+      authorization.validBefore === null ||
+      Date.now() < (authorization.validBefore + AUTHORIZATION_EXPIRY_MARGIN_SECONDS) * 1000;
+    if (executable && options.force !== true) return 'may-still-execute';
+    this.#held.delete(entry.path);
+    return 'forgotten';
+  }
+
   // -------------------------------------------------------------------------
   // Metered — a 402 is paid through uvd-x402-sdk, never by us
   // -------------------------------------------------------------------------
@@ -616,8 +1001,7 @@ export class DescribeClient {
    */
   async walletBreakdown(address: string): Promise<WalletBreakdown> {
     const path = `/reputation/wallet/${encodeURIComponent(address)}`;
-    const { body, payment, servedReceipt } = await this.getPaidJson(path);
-    const result = parseWalletBreakdown(body, payment);
+    const { result, servedReceipt } = await this.getPaidJson(path, parseWalletBreakdown);
     this.announceMalformed(path, result, servedReceipt);
     return result;
   }
@@ -631,8 +1015,7 @@ export class DescribeClient {
    */
   async agent(network: string, agentId: string | number): Promise<AgentReputation> {
     const path = `/reputation/agent/${encodeURIComponent(network)}/${encodeURIComponent(String(agentId))}`;
-    const { body, payment, servedReceipt } = await this.getPaidJson(path);
-    const result = parseAgentReputation(body, payment);
+    const { result, servedReceipt } = await this.getPaidJson(path, parseAgentReputation);
     this.announceMalformed(path, result, servedReceipt);
     return result;
   }
@@ -803,20 +1186,54 @@ export class DescribeClient {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const payment = headers['X-PAYMENT'];
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: 'GET', // never HEAD: every route but /openapi.json answers 405 to it
         headers: { Accept: 'application/json', 'User-Agent': this.ua, ...signed, ...headers },
         signal: controller.signal,
+        // 🔴 A paid request does not follow redirects. The Fetch standard
+        // strips `Authorization` on a cross-origin redirect and NOTHING else,
+        // so a 30x on the paid send would hand the `X-PAYMENT` — a bearer
+        // credential until its `validBefore` — to whatever host the Location
+        // names. describe.net never redirects a metered route; one that does is
+        // an ANSWER after paying, classified like any other (`reconcile`: a 3xx
+        // from Node, or the status-0 `opaqueredirect` a browser hands back),
+        // with the authorization held. `'manual'` and not `'error'`, measured
+        // by the refuter's round 2 on 2026-11-16: with `'error'` undici rejects
+        // with `TypeError: fetch failed`, which read as a dead socket — "no
+        // verdict, re-send" — forever, against a redirect that never answers
+        // anything else; and `'manual'` is the value every runtime accepts.
+        redirect: payment !== undefined ? 'manual' : 'follow',
       });
     } catch (error) {
       // An AbortError here is ours (the timer), not the caller's: this
       // controller is created in this function and handed to nobody.
       const name = (error as { name?: string } | null)?.name;
       if (name === 'AbortError' || name === 'TimeoutError') {
-        throw new DescribeTimeout(`GET ${path} timed out after ${this.timeoutMs} ms`, error);
+        throw new DescribeTimeout(
+          `GET ${path} timed out after ${this.timeoutMs} ms`,
+          payment !== undefined ? scrubbedCause(error, payment) : error,
+        );
       }
-      throw new DescribeUnreachable(`GET ${path} unreachable: ${String(error)}`, error);
+      // 🔴 `String(error)` is the transport's own text, and a `fetchImpl` that
+      // quotes its request in its exception would put the `X-PAYMENT` in it —
+      // a credential, in the string everybody logs. Cut out HERE, where the
+      // message is built, and not later: V8 formats `error.stack` lazily from
+      // whatever `message` holds when the stack is first read, so a message
+      // that never held the header gives a stack that never can (measured
+      // 2026-11-16: scrubbing `stack` after the fact was a mutant nothing could
+      // kill).
+      // ⚠️ And on a paid send the transport's error does NOT ride as `cause`:
+      // `util.inspect(err)`, `console.error(err)` and every error tracker that
+      // follows `cause` print it whole (the refuter's P1-1 of 2026-11-16 — the
+      // first version of this line left it "as it came", and `inspect(err)`
+      // carried the header). It rides as a scrubbed copy: name, code, message,
+      // stack and its own `cause` chain, with the header cut out of each.
+      throw new DescribeUnreachable(
+        `GET ${path} unreachable: ${withoutHeader(String(error), payment)}`,
+        payment !== undefined ? scrubbedCause(error, payment) : error,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -859,15 +1276,30 @@ export class DescribeClient {
    * it are stamped with a `PaymentAttempt` so the caller does not have to infer
    * which side of that line they landed on. Nothing above it is stamped, and
    * that asymmetry IS the signal — see `errors.ts::PaymentAttempt`.
+   *
+   * And one step comes before all of that since 2026-11-16 (F-A2): if this
+   * client already holds an authorization for this resource — it left on an
+   * earlier call and that call did not see it through — it is re-sent as is,
+   * with no free ask, no challenge and no payer before it. See `#held`.
    */
-  private async getPaidJson(
+  private async getPaidJson<T>(
     path: string,
-  ): Promise<{ body: unknown; payment: PaymentEvidence | null; servedReceipt: string | null }> {
+    parse: (body: unknown, payment: PaymentEvidence | null) => T,
+  ): Promise<{ result: T; servedReceipt: string | null }> {
+    const held = this.#held.get(path);
+    if (held) {
+      // An authorization for THIS resource already left and was not seen
+      // through. Re-send it — no new 402, no payer, no signature: the
+      // treasury was checked when it was signed, and asking again would only
+      // lead to the second authorization this branch exists to prevent.
+      return this.sendPaid(path, held, parse);
+    }
+
     const first = await this.request(path);
 
     if (first.ok) {
       // Free-tier or already-settled. No charge, so no evidence to report.
-      return { body: await this.readJson(first, path), payment: null, servedReceipt: null };
+      return { result: parse(await this.readJson(first, path), null), servedReceipt: null };
     }
 
     if (first.status === 404) {
@@ -911,35 +1343,103 @@ export class DescribeClient {
     // and a signature that never leaves the payer moves no money — the seller
     // is what settles it. A throw from `pay()` is the caller's own payer
     // talking, so it is not annotated and not translated.
-    const header = await this.payer.pay(challenge);
+    const signed = await this.payer.pay(challenge);
+    // A payer that hands back nothing usable is the caller's bug, and it is
+    // caught HERE, before anything is held or sent: a header held per resource
+    // that cannot be sent — empty, not a string, or carrying a CR/LF or a
+    // non-ASCII character that `fetch` refuses to put on the wire — would be
+    // re-sent forever as "it may have settled" although it never left. An x402
+    // envelope is base64: visible ASCII. Trimmed first, because `fetch` would
+    // trim it anyway, so the trimmed value IS what goes on the wire. The value
+    // is never quoted — it came from a signer.
+    const header = typeof signed === 'string' ? signed.trim() : '';
+    if (!/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(header)) {
+      throw new TypeError(
+        `payer.pay() returned ${typeof signed === 'string' ? 'a string that is not a header value' : `a ${typeof signed}`} ` +
+          `for GET ${path}, not an X-PAYMENT value. Nothing was sent.`,
+      );
+    }
 
     // ─────────── BELOW THIS LINE A SIGNED ENVELOPE IS IN FLIGHT ───────────
-    const terms = {
-      amount: typeof challenge.amount === 'string' ? challenge.amount : undefined,
-      token: typeof challenge.token === 'string' ? challenge.token : undefined,
-      payTo: typeof challenge.recipient === 'string' ? challenge.recipient : undefined,
+    // Held before it leaves, so every way out of `sendPaid` — the ones written
+    // today and the ones nobody has written yet — finds it there.
+    const authorization: HeldAuthorization = {
+      header,
+      ...readEnvelope(header),
+      terms: {
+        amount: typeof challenge.amount === 'string' ? challenge.amount : undefined,
+        token: typeof challenge.token === 'string' ? challenge.token : undefined,
+        payTo: typeof challenge.recipient === 'string' ? challenge.recipient : undefined,
+      },
+      sent: 0,
+      inFlight: 0,
+    };
+    this.#held.set(path, authorization);
+    return this.sendPaid(path, authorization, parse);
+  }
+
+  /**
+   * Send one held authorization and classify the answer.
+   *
+   * Whether it is a RE-send is read off the authorization's own counter when
+   * the answer arrives — the one input that changes a verdict (a 402
+   * `payment_required` on a re-send does not release it; see
+   * `resendAfterPaying`).
+   *
+   * ⚠️ **The message this throws was rewritten on 2026-11-16 (F-A2) and the old
+   * one is quoted because it is the bug:** *"Read `error.payment` before
+   * retrying: the same receipt unlocks only this byte-identical resource."* No
+   * receipt unlocks anything — `X-Payment-Receipt` is a settlement hash, and
+   * what describe.net recognises is the `X-PAYMENT` header, which the caller
+   * never held — and "before retrying", next to `transient: true`, read as
+   * "retry", which signed a second authorization. Every message now says what
+   * this client will do with the authorization, from `resend`.
+   */
+  private async sendPaid<T>(
+    path: string,
+    authorization: HeldAuthorization,
+    parse: (body: unknown, payment: PaymentEvidence | null) => T,
+  ): Promise<{ result: T; servedReceipt: string | null }> {
+    const { header, terms, validBefore, nonce, network } = authorization;
+    authorization.sent += 1;
+    const resent = () => authorization.sent > 1;
+    const unanswered = {
+      serverError: null,
+      retryable: null,
+      retryAfterSeconds: null,
+      nextAction: null,
+      validBefore,
+      nonce,
+      network,
     };
 
     let second: Response;
+    authorization.inFlight += 1;
     try {
       second = await this.request(path, { 'X-PAYMENT': header });
     } catch (error) {
       // No answer at all — timeout or dead socket. `fetch` rejects identically
       // whether the request bytes were written or not, so this is exactly the
-      // case that CANNOT be narrowed: `unknown`, said out loud.
-      throw attachPayment(error, {
+      // case that CANNOT be narrowed: `unknown`, said out loud. And the one
+      // where the header may never have reached anyone, which is why it stays
+      // in `#held` and nowhere else (it is already there: held before sent).
+      throw this.failedAfterSending(error, path, authorization, {
         settlement: 'unknown',
         receipt: null,
         settlementPending: false,
         reused: null,
         ...terms,
+        resend: resendAfterPaying(undefined, null, resent()),
+        ...unanswered,
       });
+    } finally {
+      authorization.inFlight -= 1;
     }
 
     const receipt = second.headers.get('X-Payment-Receipt');
     const reused = second.headers.get('X-Payment-Reused');
     const receiptPending = receipt === SETTLEMENT_PENDING;
-    const attempt: PaymentAttempt = {
+    const evidence: Omit<PaymentAttempt, keyof typeof unanswered | 'resend'> = {
       // A receipt is the settlement transaction hash, put there by the seller:
       // proof, not inference. Its absence proves nothing — an unhandled 500 is
       // rendered above the paywall middleware and never gets the header.
@@ -969,28 +1469,44 @@ export class DescribeClient {
       // paywall settles BEFORE running the query. The status is preserved so a
       // caller can tell "they refused the payment" (4xx) from "we paid and
       // their query blew up" (5xx) — different conversations to have with them.
-      throw attachPayment(
+      // ONE read of the body, for the reason and for the four fields describe.net
+      // writes next to it on every post-payment refusal (`error`, `retryable`,
+      // `retry_after_seconds`, `next_action`; `describenet/paywall.py`
+      // `_unavailable`, `_conflict`, `_rejected`).
+      const record = await bodyRecord(second);
+      const rawError = typeof record?.error === 'string' ? record.error : null;
+      const attempt: PaymentAttempt = {
+        ...evidence,
+        resend: resendAfterPaying(second.status, rawError, resent()),
+        serverError: serverText(rawError, 120, header),
+        retryable: typeof record?.retryable === 'boolean' ? record.retryable : null,
+        retryAfterSeconds: retryAfterOf(second, record),
+        nextAction: serverText(record?.next_action, 600, header),
+        validBefore,
+        nonce,
+        network,
+      };
+      // Every other answer leaves it held — it is already there, set before
+      // the send. There is deliberately no "hold again" here: a concurrent
+      // call that was DELIVERED released it, and putting a delivered
+      // authorization back is how a later read re-sends a spent one and reads
+      // a 409 as "it may have moved money" (the refuter's P2-2).
+      if (attempt.resend === 'new-challenge-ok') this.release(path, header);
+      const failure = attachPayment(
         new DescribeHTTPError(
           second.status,
-          `GET ${path} -> HTTP ${second.status} AFTER paying (settlement: ${attempt.settlement}` +
-            `${receipt ? `, receipt ${receipt}` : ''}). Read \`error.payment\` before retrying: ` +
-            'the same receipt unlocks only this byte-identical resource.',
+          `GET ${path} -> HTTP ${second.status}` +
+            `${attempt.serverError ? ` ${attempt.serverError}` : ''} AFTER paying ` +
+            `(settlement: ${attempt.settlement}${receipt ? `, receipt ${receipt}` : ''}). ` +
+            adviceAfterPaying(attempt),
           // The most expensive door gets the reason too: a 4xx/5xx AFTER money
           // moved is exactly where "what did they SAY" matters most.
-          { serverReason: await serverReason(second) },
+          { serverReason: reasonOf(record, header) },
         ),
         attempt,
       );
-    }
-
-    let body: unknown;
-    try {
-      body = await this.readJson(second, path);
-    } catch (error) {
-      // The worst of the set and the easiest to forget: a 200 whose body is
-      // garbage. It settled — the receipt is right there — and the caller got
-      // nothing for it. Swallowing THIS was the old behaviour.
-      throw attachPayment(error, attempt);
+      this.#heldFor.set(failure as object, { path, authorization });
+      throw failure;
     }
 
     // The receipt is a hash too, and it is the one hash the caller is most
@@ -1016,16 +1532,70 @@ export class DescribeClient {
     // has to string-compare against a sentinel. The flag is the state; the
     // field is the hash; neither ever stands in for the other.
     const receiptOk = receipt !== null && looksLikeSettlementReceipt(receipt);
-    return {
-      body,
-      payment: {
-        receipt: receiptOk && !receiptPending ? receipt : null,
-        settlementPending: receiptPending,
-        reused: (reused ?? '').toLowerCase() === 'true',
-        malformedHashes: receipt !== null && !receiptOk ? ['receipt'] : [],
-      },
-      servedReceipt: receipt,
+    const payment: PaymentEvidence = {
+      receipt: receiptOk && !receiptPending ? receipt : null,
+      settlementPending: receiptPending,
+      reused: (reused ?? '').toLowerCase() === 'true',
+      malformedHashes: receipt !== null && !receiptOk ? ['receipt'] : [],
     };
+
+    let result: T;
+    try {
+      result = parse(await this.readJson(second, path), payment);
+    } catch (error) {
+      // The worst of the set and the easiest to forget: a 200 whose body is
+      // garbage. It settled — the receipt is right there — and the caller got
+      // nothing for it. Swallowing THIS was the old behaviour. Held: the same
+      // header reads it again from describe.net's receipt, a new one buys it.
+      //
+      // ⚠️ The PARSE is inside this `try` since 2026-11-16, and that closed a
+      // hole the "body is not JSON" case hid: a 200 whose JSON lacks its
+      // essential shape (`parse.ts` throws `DescribeUnparseable`) used to be
+      // parsed by the public method, AFTER this function returned — so it left
+      // with no `error.payment`, `failedAfterPaying()` said "nothing was
+      // transmitted", the README said "retry freely", and the retry signed a
+      // second authorization for a read that had already settled.
+      throw this.failedAfterSending(error, path, authorization, {
+        ...evidence,
+        resend: resendAfterPaying(second.status, null, resent()),
+        ...unanswered,
+      });
+    }
+
+    // Delivered. One authorization pays one read: the next call is a new
+    // purchase, so it is no longer held.
+    this.release(path, header);
+    return { result, servedReceipt: receipt };
+  }
+
+  /** Let go of an authorization — only if it is still the one held. */
+  private release(path: string, header: string): void {
+    if (this.#held.get(path)?.header === header) this.#held.delete(path);
+  }
+
+  /**
+   * A failure that left no answer we could read — a timeout, a dead socket, a
+   * 2xx whose body could not be parsed — after the authorization was sent.
+   *
+   * Says so in the message (`AFTER paying` + the same advice as every other
+   * post-payment failure) and stamps `payment`. The header was already kept
+   * out of the transport's message where that message is built — see the
+   * `DescribeUnreachable` in `request()` — and nothing appended here comes from
+   * the response.
+   */
+  private failedAfterSending(
+    error: unknown,
+    path: string,
+    authorization: HeldAuthorization,
+    attempt: PaymentAttempt,
+  ): unknown {
+    if (typeof error === 'object' && error !== null) this.#heldFor.set(error, { path, authorization });
+    if (error instanceof DescribeError) {
+      error.message =
+        `${error.message} — AFTER paying (settlement: ${attempt.settlement}` +
+        `${attempt.receipt ? `, receipt ${attempt.receipt}` : ''}). ${adviceAfterPaying(attempt)}`;
+    }
+    return attachPayment(error, attempt);
   }
 
   /**

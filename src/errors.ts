@@ -227,7 +227,67 @@ export type DescribeErrorKind =
  * way to read the state back is comparing strings against a sentinel. The
  * field that carries the hash never carries the placeholder — read the state
  * from `settlementPending`, never from `receipt === 'pending'`.
+ *
+ * ## `resend` — what to do with the authorization, added 2026-11-16 (F-A2)
+ *
+ * ⚠️ **This corrects what 0.1.0–0.5.0 told a caller, and the old advice is left
+ * here because it is the bug.** A 5xx, a timeout or a dead socket after paying
+ * came out `transient: true`, the README said *"build [a retry] on
+ * `error.transient`"*, and calling the method again started a fresh 402 and had
+ * the payer sign a SECOND authorization — measured with a spy payer, two
+ * signatures for one read. describe.net's own docs name that exact move as the
+ * way to pay twice: *"In every case, retry the same request with the **same**
+ * `X-PAYMENT` header after `Retry-After`. Signing a fresh authorization here can
+ * make you pay twice"* (`describe-net/site/auth.md:350-372`). The message said
+ * *"the same receipt unlocks only this byte-identical resource"*, and no
+ * receipt unlocks anything: the header does, and the caller never held it.
+ *
+ * Now the client holds it (one per resource, never on this object — see
+ * `client.ts`, "the held authorization"), calling the method again re-sends it,
+ * and `resend` says which of three situations you are in. It is a CLOSED
+ * union on purpose: it is this SDK's own verdict, not a server code.
+ *
+ *   * `'same-header'` — no verdict yet (every 5xx, a 429, a timeout, a dead
+ *     socket, a 2xx whose body could not be read, a 402 `payment_required` on a
+ *     re-send). Call the same method again, after `retryAfterSeconds` when it is
+ *     set: this client re-sends the SAME authorization, which cannot be charged
+ *     twice. Do not sign a new one.
+ *   * `'reconcile'` — the authorization may already have moved money and
+ *     re-sending it will not change the answer (any 409, any other 402, any
+ *     other 4xx, a 3xx). Read `nextAction` and look on-chain for the transfer
+ *     to `payTo` before buying this resource again. Calling the method again
+ *     still re-sends the same authorization, never a new one;
+ *     `DescribeClient.forgetAuthorization(error)` is how you decide to buy it
+ *     again.
+ *   * `'new-challenge-ok'` — describe.net says nothing was settled. This
+ *     client dropped the authorization, and the next call asks for a new
+ *     challenge and signs a new one.
+ *
+ * 🔴 `'new-challenge-ok'` is a WHITELIST of two, never "a 402": a `402` whose
+ * `error` is exactly `PAYMENT_VERIFICATION_FAILED`, or exactly
+ * `payment_required` on the FIRST send of that authorization. That is
+ * describe.net's rule word for word — *"Only two answers to a replay mean that
+ * nothing was settled, and both are a `402` whose `error` says so"*
+ * (`describe-net/site/paybox.md:151-163`), and *"`payment_required` speaks only
+ * for the request that got it: if you presented that authorization earlier and
+ * got a `503`, that `503` still rules"*. Every other 402 can sit on top of an
+ * authorization that was used — `PAYMENT_SETTLEMENT_FAILED`, `FACILITATOR_ERROR`
+ * after a `/verify` that passed (`describe-net/docs/BACKLOG.md:106`) — and a
+ * list of EXCEPTIONS (*"a 402 means sign again, except…"*) is how that one gets
+ * through. Exact match, no case-folding, no trimming: a variant lands on the
+ * safe side.
+ *
+ * `transient` keeps its meaning — would retrying help — and after a payment it
+ * is now also SAFE to act on: a retry is a re-send of the authorization this
+ * client already holds — before AND after its `validBefore`, because the
+ * client never lets go of it by the clock (see `client.ts`, `#held`, and the
+ * correction written there). But it is the coarser of the two, so branch on
+ * `resend`. The only ways to a second signature for the same resource are
+ * the whitelist 402 and `DescribeClient.forgetAuthorization(error)`, which is
+ * the caller's decision after checking on-chain.
  */
+export type PaymentResend = 'same-header' | 'reconcile' | 'new-challenge-ok';
+
 export interface PaymentAttempt {
   /** `'settled'` only with the seller's statement in hand — a hash, or `pending`. */
   settlement: 'settled' | 'unknown';
@@ -252,11 +312,115 @@ export interface PaymentAttempt {
   token?: string;
   /** The recipient we verified against the pinned treasury before signing. */
   payTo?: string;
+  /**
+   * What to do with the authorization — the field to branch on after a
+   * payment. See "`resend`" above; added 2026-11-16 (F-A2).
+   */
+  resend: PaymentResend;
+  /**
+   * The body's `error`, as served (`facilitator_unavailable`,
+   * `authorization_spent`, `PAYMENT_VERIFICATION_FAILED`…), or `null` when the
+   * answer had none or there was no answer. URL-redacted and capped like
+   * `serverReason`: server-written text.
+   */
+  serverError: string | null;
+  /** The body's `retryable`, when it was a boolean. `null` otherwise. */
+  retryable: boolean | null;
+  /**
+   * How long to wait before re-sending, in whole seconds: the `Retry-After`
+   * header (delay-seconds or an IMF-fixdate), else the body's
+   * `retry_after_seconds`, capped at `MAX_RETRY_AFTER_SECONDS` (30). `null`
+   * when the answer named no wait.
+   */
+  retryAfterSeconds: number | null;
+  /**
+   * The body's `next_action`: describe.net's own instruction for this answer,
+   * in its own words (often Spanish). URL-redacted and capped at 600 chars.
+   * Read it; never parse it.
+   */
+  nextAction: string | null;
+  /**
+   * When the authorization stops being executable, in Unix SECONDS, read from
+   * the signed `X-PAYMENT` itself (`payload.authorization.validBefore`, the
+   * EIP-3009 field). Public: it is a timestamp, not the credential. `null` when
+   * the header does not carry one this client can read (or carries one above
+   * 1e11, which is milliseconds, not seconds). Informational: past it the
+   * authorization can no longer execute — half of the check before
+   * `forgetAuthorization()`; the other half is on-chain. The client itself
+   * never lets go of an authorization by this clock.
+   */
+  validBefore: number | null;
+  /**
+   * The EIP-3009 `nonce` of the signed authorization (`0x` + 64 hex), read
+   * from the header like `validBefore`, or `null`. The value the token
+   * contract records when it executes (`AuthorizationUsed(authorizer, nonce)`,
+   * `authorizationState(authorizer, nonce)`): the one way to tell THIS
+   * authorization's transfer from every other 0.01 USDC sent to the treasury,
+   * which is the check `'reconcile'` asks for. Public: without the signature
+   * it authorises nothing, and the signature never leaves the client.
+   */
+  nonce: string | null;
+  /** The envelope's `network` (`eip155:8453`; v1 envelopes say `base`), or `null`. */
+  network: string | null;
+}
+
+/**
+ * The two answers that mean nothing was settled — describe.net's whitelist,
+ * `describe-net/site/paybox.md:151-163`. Compared EXACTLY. See "`resend`" on
+ * {@link PaymentResend}.
+ */
+const SIGN_AGAIN_402 = {
+  verificationFailed: 'PAYMENT_VERIFICATION_FAILED',
+  paymentRequired: 'payment_required',
+} as const;
+
+/**
+ * What to do with an authorization that already left, given the answer to it.
+ *
+ * Internal (`client.ts` is the only caller) and pure, so the table is in one
+ * place. `status` is `undefined` when no answer arrived at all (a timeout, a
+ * dead socket); `error` is the body's `error` exactly as served, never the
+ * redacted copy; `resent` is whether this authorization has been sent more
+ * than once, by any call (`client.ts` counts sends per authorization, and reads
+ * the count when the answer arrives: two concurrent calls share one).
+ *
+ * Read the 402 branch first, it is the only one that can say "sign again":
+ * `payment_required` on a re-send means THIS request reached describe.net with
+ * no header (a proxy that strips it, say), and that says nothing about the send
+ * that got the earlier 503 — paybox.md: *"that `503` still rules"*. Measured on
+ * the server side the same day: once an authorization has been presented, the
+ * paywall never answers it with a 402 again (`not vinculo.nuevo` → 409
+ * `authorization_spent`, `describenet/paywall.py:2143-2144`), so a re-send that
+ * meets a `PAYMENT_VERIFICATION_FAILED` is one whose earlier sends never
+ * reached the paywall.
+ */
+export function resendAfterPaying(
+  status: number | undefined,
+  error: string | null,
+  resent: boolean,
+): PaymentResend {
+  if (status === undefined) return 'same-header';
+  if (status >= 200 && status < 300) return 'same-header';
+  if (status === 402) {
+    if (error === SIGN_AGAIN_402.verificationFailed) return 'new-challenge-ok';
+    if (error === SIGN_AGAIN_402.paymentRequired) return resent ? 'same-header' : 'new-challenge-ok';
+    return 'reconcile';
+  }
+  if (status === 409) return 'reconcile';
+  if (status === 429 || status >= 500) return 'same-header';
+  return 'reconcile';
 }
 
 export class DescribeError extends Error {
   readonly kind: DescribeErrorKind;
-  /** Would retrying help? Drives backoff, never `failOpen`. */
+  /**
+   * Would retrying help? Drives backoff, never `failOpen`.
+   *
+   * After a payment (`payment` set) a retry is a re-send of the authorization
+   * the client holds for that resource, never a new signature — but branch on
+   * `payment.resend`, which also says when NOT to call again. Until 2026-11-16
+   * a retry here signed a second authorization (see `PaymentResend`).
+   */
   readonly transient: boolean;
   /** Is this describe.net's fault? Drives `failOpen`, never retry. */
   readonly serviceFault: boolean;
@@ -275,6 +439,14 @@ export class DescribeError extends Error {
    * from a message, a URL or a `cause`. That is the redaction guard: a
    * transport exception can carry an endpoint with an API key in it, and this
    * is the string most likely to end up pasted into a ticket.
+   *
+   * ⚠️ After a payment (`payment` set) it is the SECOND thing to read. It is
+   * chosen by `kind` alone, before anybody knows money moved, so on a paid
+   * `http_5xx` it names the free route for the coarse version of the question
+   * — which costs nothing and is still true, and is not the move: that is
+   * `payment.resend` (usually: call again, the same authorization is re-sent).
+   * Left as is on 2026-11-16 because the text is shared word for word with
+   * the Python twin; see `PaymentResend`.
    */
   readonly recovery: string | null;
   /**
@@ -282,6 +454,14 @@ export class DescribeError extends Error {
    * one reason: the failure is built deep in the transport, which knows nothing
    * about payment, and `attachPayment()` stamps it on the way out. Treat it as
    * readonly — nothing in this package writes it twice.
+   *
+   * 🔴 It never carries the `X-PAYMENT` header, and that is structural: this is
+   * an ENUMERABLE property, so it travels in `JSON.stringify(error)`, in every
+   * structured logger and in every error tracker — and until its `validBefore`
+   * the header is money to whoever holds it (a timeout can mean it never
+   * reached the server at all). The client keeps it in a `#private` map that no
+   * serialization reaches, which is the only reason calling the method again
+   * can re-send it.
    */
   payment?: PaymentAttempt;
 
@@ -612,10 +792,16 @@ export function failOpenCovers(error: unknown): error is DescribeError {
 /**
  * Did this failure happen with a signed envelope already in flight?
  *
- * `true` means the money MAY have moved and you should reconcile; read
- * `error.payment` for the receipt (proof) or the `'unknown'` that says the SDK
- * cannot tell. `false` means nothing was transmitted — a 402 with no payer, a
- * `DO_NOT_PAY`, a 404, a payer that declined, or any failure on a free route.
+ * `true` means the money MAY have moved; read `error.payment` for the receipt
+ * (proof) or the `'unknown'` that says the SDK cannot tell, and
+ * `error.payment.resend` for what to do with the authorization — usually: call
+ * the same method again, which re-sends it. `false` means nothing was
+ * transmitted — a 402 with no payer, a `DO_NOT_PAY`, a 404, a payer that
+ * declined, or any failure on a free route.
+ *
+ * ⚠️ Until 2026-11-16 this read *"`true` means the money MAY have moved and you
+ * should reconcile"*, and next to a `transient: true` the reconciliation most
+ * callers wrote was a retry that signed a second authorization.
  */
 export function failedAfterPaying(
   error: unknown,

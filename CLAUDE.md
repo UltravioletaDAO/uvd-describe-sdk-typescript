@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **372 tests in ~1,4 s** on 2026-11-16, Node 20.20.2 (0.6.0 — the held authorization, F-A2: 27 in the `tras pagar` block of `client.test.ts`). Before: **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, four entries (`index`, `x402/index`, `partner/index`, `widget/index`; this row said "two" until 0.5.0) |
@@ -77,7 +77,7 @@ pay, deliberately.
 | Module | Owns, exclusively |
 |---|---|
 | `config.ts` | Every calibrable number and the pinned treasury. Nothing else re-types them |
-| `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only) and the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`) |
+| `errors.ts` | The failure taxonomy, the predicate that decides what `failOpen` swallows (`failOpenCovers`, free routes only), the one that says whether a signed envelope was already in flight (`failedAfterPaying` / `PaymentAttempt`), and since 0.6.0 the one that says what to do with that envelope (`resendAfterPaying` → `PaymentResend`, describe.net's whitelist of two) |
 | `recovery.ts` | **What to do INSTEAD** — one frozen sentence per `kind` (Execution Market's contribution, 2026-08-30). Nothing but literals: no call site builds a recovery out of a message, a URL or a `cause`, and that IS the redaction guard. `timeout` is `null` and its entry defends why |
 | `caveats.ts` | The caveat codes as an exported contract — ten since 0.4.1, the same set describe.net serves (it said "the eight" until `facilitator-authored` was mirrored in 0.4.0, and "nine" until `thin-chain`, served since 2026-09-04, was added to both twins at once). Open union, never closed. Since 0.4.0 also the author classes of `Rating.authorClass` (open the same way), `requireFullCaveats()` — the gate that reads `caveatsNotComputed` and fails closed on its absence — and its `CaveatsNotComputedError`, which is deliberately NOT a `DescribeError` |
 | `format.ts` | How a score is written down. Two functions, no state |
@@ -85,7 +85,7 @@ pay, deliberately.
 | `hashes.ts` | Whether a string is shaped like an on-chain id — the UNION of EVM hex, Solana base58 and a bare digest, plus the receipt's `pending`. Also the rule about which fields are NOT checked (`build_sha`) and why |
 | `raters.ts` | One function. Its docstring is the deliverable: the per-chain maximum understates and the per-chain sum double-counts, both measured |
 | `parse.ts` | Wire JSON → typed. The only place a `null` could be lost, so it is the place to look when one is |
-| `client.ts` | HTTP, timeouts, fail-open, the 402 dance, the treasury check |
+| `client.ts` | HTTP, timeouts, fail-open, the 402 dance, the treasury check, and since 0.6.0 the held authorization (`#held`, the ONLY place a signed `X-PAYMENT` lives after it leaves) |
 | `x402/index.ts` | The payer adapter. Type-only import — nothing at runtime |
 | `widget/card.ts` | WHAT the score card shows: the score parse (`null` is never `0`, and `Number('')` is `0`), the link rule, the rows, the three languages, the untranslated credit. Pure — no DOM, no clock |
 | `widget/theme.ts` | describe.net's tokens, written once, and the CSS derived from them. `theme.test.ts` computes their contrast |
@@ -226,6 +226,36 @@ pay, deliberately.
    `Rating.authorClass` absent is `null`, never `rater-authored`, and a class this
    SDK has not heard of arrives verbatim — never thrown, never nulled.
 
+13. 🔴 **After paying, a second call re-sends the SAME authorization, and only
+   the whitelist 402 lets the payer sign again.** Added 2026-11-16 (0.6.0, F-A2).
+   Until then a 503, a timeout or a dead socket after paying came out
+   `transient: true`, the README said to retry on `transient`, and the retry
+   signed a SECOND authorization. A spy payer measured it: two signatures, one
+   read. describe.net says that move charges twice (`auth.md:350-372`). Now
+   `client.ts::#held` keeps the header per resource (path), set BEFORE it
+   leaves, and lets it go on exactly three events: a 2xx whose body PARSED, the
+   whitelist 402 (`errors.ts::resendAfterPaying` → `'new-challenge-ok'`:
+   `PAYMENT_VERIFICATION_FAILED`, or `payment_required` when that authorization
+   was sent only once, both matched exactly), and the caller's
+   `forgetAuthorization(error)`. 🔴 **Never by the clock**: the first draft
+   let go at `validBefore` + 15 s, and its refuter measured it buying a settled
+   read twice 76 s after a `500` with a receipt (`uvd-x402-sdk` signs for 60 s
+   on five chains; describe.net replays from the receipt for 300–1800 s). An
+   expired authorization costs nothing to re-send, and describe.net's answer to
+   it is the evidence. The header lives ONLY there, never in `error.payment`
+   (enumerable → in `JSON.stringify(err)`), never in `cause` on a paid send (a
+   scrubbed copy rides instead: `inspect(err)` prints `cause`), and never on a
+   `private` property (TypeScript's `private` does not hide anything from
+   `JSON.stringify(client)`); the paid send uses `redirect: 'manual'` (a 3xx is
+   an answer, `reconcile`; `'error'` read as a dead socket, re-sent forever).
+   `forgetAuthorization()` refuses while a send is unanswered and until
+   `validBefore` + `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` (or `force`). The
+   mutations are listed in the "Auto-refutación" section of the PR that added
+   this — whitelist widened, `#held` bypassed, header on the error, release on
+   failure, no release on success, release by clock, and others — and every
+   one of them goes red in the `tras pagar` block of `client.test.ts`
+   (`npx vitest run src/client.test.ts -t "tras pagar"`).
+
 ## Measured traps
 
 **`Boolean([])` is `true` in JavaScript.** describe.net's free routes carry
@@ -322,6 +352,19 @@ named `MOUNTS THE BAD STATE`.
 reads the registry); the browser refuses the module and the page shows no score
 at all, only a console error. Any host that vendors `dist/widget/index.mjs` has
 to check the `Content-Type` it serves.
+
+**`Date.parse('5.5')` is a day in May 2001.** Measured 2026-11-16 on Node
+20.20.2 (`989035200000`). V8's `Date.parse` accepts almost any string, so a
+`Retry-After` parser that tries `Date.parse` on whatever is not delay-seconds
+turns a garbage header into a date in the past and a wait of `0`, which reads
+as "re-send now" instead of "no usable header". `client.ts::retryAfterOf`
+therefore checks the IMF-fixdate SHAPE before it parses. The test that mounts
+it is the `retryAfterSeconds` one in `client.test.ts` ("`5.5` is not a day in
+2001").
+Reproduce: `node -e "console.log(Date.parse('5.5'))"`.
+What separates it from its neighbour: `Number('5.5')` is `5.5`, a perfectly
+reasonable number. The trap is not the number parser, it is the date parser
+saying yes.
 
 **`/leaderboard` takes no parameters.** `?limit=2` answers **422**
 `leaderboard_takes_no_params`. Paging is the metered `/leaderboard/page`.

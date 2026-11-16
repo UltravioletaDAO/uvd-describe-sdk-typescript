@@ -14,6 +14,94 @@ header.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
+## 0.6.0 — 2026-11-16 (not published yet)
+
+Also carries the DN-PUB-01 change listed under "Unreleased" below, which landed
+on `main` after 0.5.0 without a bump. 0.5.0 was never published either, so the
+first npm release after 0.4.1 is this one.
+
+### Fixed — after paying, calling again re-sends the authorization instead of signing a second one (F-A2) [money]
+
+- **The bug, measured with a spy payer:** after a 5xx, a timeout or a dead
+  socket that followed the payment, the error came out `transient: true`, the
+  README said to build the retry on `transient`, and calling the method again
+  started a new 402 and had the payer sign a **second** authorization: two
+  signatures for one read. describe.net says that move can charge twice
+  (`describe-net/site/auth.md:350-372`).
+- **Now the client holds the authorization it sent**, one per resource, in a
+  `#private` map, and calling `walletBreakdown()` / `agent()` again for the same
+  resource re-sends the **same** `X-PAYMENT`, with no new 402, no payer and no
+  signature. It lets go when the read is delivered, on the whitelist 402, and
+  on `forgetAuthorization(error)` — **never by the clock**. Releasing at
+  `validBefore` + 15 s, where this change started before its review, buys a
+  settled read twice on the chains where `uvd-x402-sdk` signs for 60 s:
+  describe.net replays a settled read from its receipt for 300–1800 s, and an
+  expired authorization costs nothing to re-send.
+- **The header is in no serialization**: not in `error.payment`, not in the
+  message, not in `JSON.stringify(err)` or `util.inspect` of the error or the
+  client. A transport or a body that echoes it — verbatim, percent-encoded or
+  with escaped slashes — has it replaced by `[x-payment-redacted]` before any
+  truncation, and on a paid send the transport's error rides in `cause` as a
+  scrubbed copy (name, code, message, stack, nested cause).
+- **The paid request does not follow redirects** (`redirect: 'manual'`): Fetch
+  strips only `Authorization` on a cross-origin redirect, so a 30x would have
+  handed the `X-PAYMENT` to another host. The 3xx is classified as an answer
+  (`reconcile`); `'error'` would have surfaced as `fetch failed`, a dead socket
+  re-sent forever.
+- **A payer that returns no usable header** (empty, not a string, a CR/LF,
+  non-ASCII) is a `TypeError` before anything is held or sent.
+- **The message no longer says** *"the same receipt unlocks only this
+  byte-identical resource"*. A receipt unlocks nothing. It now depends on the
+  status and the body's `error`, and says what the client will do with the
+  authorization.
+- **A paid 200 whose JSON lacks its essential shape now carries
+  `error.payment`** and is held. It used to be parsed after the paid path
+  returned, so it left with no `payment`, `failedAfterPaying()` said nothing
+  was transmitted, and the README's "retry freely" signed again.
+
+### Added
+
+- `PaymentAttempt.resend`: `'same-header' | 'reconcile' | 'new-challenge-ok'`
+  (type `PaymentResend`). `'new-challenge-ok'` is a whitelist of two, matched
+  exactly: a 402 whose `error` is `PAYMENT_VERIFICATION_FAILED`, or
+  `payment_required` on the authorization's first send
+  (`describe-net/site/paybox.md:151-163`). Every other 402, every 409 and every
+  other 4xx is `'reconcile'`. Every 5xx, a 429, a timeout, a dead socket and an
+  unreadable 2xx are `'same-header'`.
+- `PaymentAttempt.serverError`, `retryable`, `retryAfterSeconds` (the
+  `Retry-After` header, delay-seconds or IMF-fixdate, else the body's
+  `retry_after_seconds`, capped at `MAX_RETRY_AFTER_SECONDS` = 30, describe.net's
+  own ceiling), `nextAction` (URL-redacted, capped at 600) and `validBefore`
+  (read from the signed header; public; `null` when unreadable or in ms).
+- `PaymentAttempt.nonce` and `network`: the EIP-3009 nonce and the envelope's
+  network, read from the signed header (public) — what the on-chain check of
+  `reconcile` needs to tell this authorization's transfer from any other.
+- `DescribeClient.forgetAuthorization(error, { force? })` →
+  `'forgotten' | 'not-held' | 'in-flight' | 'may-still-execute'`: drops the
+  authorization that failure was about (following `cause` five levels), so the
+  next call signs a new one — for after the on-chain check
+  (`describe-net/site/paybox.md`, step 7). Refuses while a send of it is
+  unanswered (never overridable) and until `validBefore` +
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` (15 s) has passed or when it is
+  unknown (`force` overrides only this); never drops a newer one.
+- Exported: `PaymentResend`, `MAX_RETRY_AFTER_SECONDS`,
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`.
+
+### ⚠️ Breaking (types only)
+
+- The eight new `PaymentAttempt` fields are REQUIRED (`null` when absent, like
+  `receipt`). Code that builds a `PaymentAttempt` literal — a test double —
+  stops compiling until it adds them. Nothing changes for code that reads one.
+
+### Not changed, on purpose
+
+- `transient` keeps its values. After a payment, a retry built on it is now a
+  re-send, before and after `validBefore`.
+- `recovery` keeps its frozen text (shared with the Python twin). After a
+  payment, read `payment.resend` first.
+- Nothing is re-sent on its own. Two concurrent calls for the same resource
+  now share one authorization.
+
 ## Unreleased (DN-PUB-01, no version bump)
 
 ### Changed
