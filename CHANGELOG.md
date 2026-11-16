@@ -129,9 +129,19 @@ went out two hours before this change was proposed.
   free ask is NOT single-flight: the round's own first draft made it so, and
   its refuter measured every answer that buys nothing — the partner rail's
   free 200, a timeout during an outage — running one call at a time (P2-A).
-- **A waiter gives up after `timeoutMs`** with a `DescribeTimeout` that
-  carries no `payment` (it sent and paid nothing), and is taken out of the
-  count before it throws. Without the bound, a payer that never answered left
+- ⚠️ **Semantics change, ratified by c0der:** a read paid and not handed over
+  is OWED, and the next call for that resource — retry or fresh read — re-sends
+  the authorization instead of buying again; past the receipt window that
+  answers `409`, and when this client already delivered a read with that
+  authorization the error says so and names `forgetAuthorization(error)`
+  (chosen over forgetting and re-buying on its own, which would make a second
+  payment a reflex).
+- **Each wait for another call's signature lasts at most `timeoutMs`** (per
+  wait, not per call: k declining payers in a row add up to k × `timeoutMs`),
+  then a `DescribeTimeout` that carries no `payment` (it sent and paid
+  nothing; it says `serviceFault: true` although the slow party is the
+  caller's own payer), and the waiter is taken out of the count before it
+  throws. Without the bound, a payer that never answered left
   every later call for that resource waiting forever (P2-B of the same
   refuter). `X402Payer.pay()` is documented to resolve or throw.
 - **A delivery no longer lets go of a read another call is owed**. Each held

@@ -427,14 +427,21 @@ try {
 * **Two calls at once for one resource sign once.** Both ask for free, in
   parallel; a call whose `402` arrives while another is reading the challenge
   or waiting on its payer (a human approving it, say) waits for that signature
-  and sends it too. It waits at most `timeoutMs`, then throws a
-  `DescribeTimeout` with no `payment` — it sent and paid nothing, so calling
-  again is safe. Your `pay()` must resolve or throw. If one of them gets a
+  and sends it too. Each such wait lasts at most `timeoutMs`, then the call
+  throws a `DescribeTimeout` with no `payment` — it sent and paid nothing, so
+  calling again is safe (it says `serviceFault: true`, but the slow party was
+  your own payer). Your `pay()` must resolve or throw. If one of them gets a
   `503` and the other is delivered, the `503` one's retry re-sends the same
   authorization: its read was paid, and describe.net serves it again from its
   receipt (*"re-send the same header to the request you signed it for"*,
   [auth.md](https://describe.net/auth.md)). "Same resource" means the same
   string: `walletBreakdown('0xABC…')` and its lower-case spelling are two.
+* **A read that was paid and not handed over is owed** (since 0.6.0): the
+  next call for that resource — a retry or a fresh read, the client cannot
+  tell them apart — re-sends the authorization instead of buying again. Past
+  describe.net's receipt window (300–1800 s) that re-send answers `409`; when
+  this client already delivered a read with it, the error says so and names
+  `forgetAuthorization(err)`.
 * **It is let go** when the read is delivered and no other call that took it
   is still out or still owed its read (one authorization pays one read: the
   next call is a new purchase), on the whitelist `402`, and when **you**

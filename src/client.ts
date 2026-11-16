@@ -201,9 +201,11 @@ export interface X402Payer {
    *
    * It must RESOLVE OR THROW. While it is pending, every other call this
    * client makes for the same resource waits for its signature instead of
-   * signing its own — each for up to `timeoutMs`, then a `DescribeTimeout`
-   * that sent and paid nothing (since 0.6.0; see `DescribeClient.#acquiring`).
-   * A payer that waits on a human should carry its own deadline.
+   * signing its own — each wait lasting at most `timeoutMs`, then a
+   * `DescribeTimeout` that sent and paid nothing (since 0.6.0; see
+   * `DescribeClient.#acquiring`). That timeout says `serviceFault: true`
+   * although the slow party is this payer: do not page on it as "describe.net
+   * is down". A payer that waits on a human should carry its own deadline.
    */
   pay(challenge: X402Challenge): Promise<string>;
 }
@@ -665,6 +667,14 @@ interface HeldAuthorization {
    */
   owed: number;
   /**
+   * Reads this client handed over with it (a 2xx whose body parsed). Once
+   * above zero the authorization is known to have SETTLED, so a 409 to a later
+   * re-send of it is describe.net's receipt window closing, not a payment in
+   * doubt — and the error says so (`ALREADY_DELIVERED_409`). Added 2026-11-16
+   * at c0der's request when ratifying `owed`.
+   */
+  delivered: number;
+  /**
    * How many times it has been SENT, by any call. Counted per authorization
    * and not per call, because two concurrent calls share one: a first send
    * answered `payment_required` says nothing about the other send of the same
@@ -715,6 +725,22 @@ function join(authorization: HeldAuthorization): HeldAuthorization {
 
 /** What replaces the header wherever it would otherwise be quoted. */
 const HEADER_REDACTED = '[x-payment-redacted]';
+
+/**
+ * Appended to a 409 on an authorization this client already delivered a read
+ * with (`HeldAuthorization.delivered`). A literal, like every advice here.
+ *
+ * Why a message and not a self-healing re-purchase — the other option c0der
+ * offered when ratifying `owed` on 2026-11-16: forgetting and buying again on
+ * its own is paying a second time as a REFLEX, which `forgetAuthorization()`
+ * exists to make a decision. The 409 stays typed (`DescribeHTTPError`, status
+ * 409, `payment.resend: 'reconcile'`); this sentence names the way out.
+ */
+const ALREADY_DELIVERED_409 =
+  ' This client already delivered a read paid with this authorization, so it SETTLED and this ' +
+  '409 is describe.net no longer serving that read again (its receipt window is over), not a ' +
+  'payment in doubt. To buy the read again, call `forgetAuthorization(error)`: past ' +
+  '`validBefore` it answers `forgotten` and the next call signs a new authorization.';
 
 /**
  * Below this length a "header" is not an x402 envelope (a real one is a
@@ -1468,6 +1494,17 @@ export class DescribeClient {
    * `waiting` before it throws, so the authorization held later does not
    * count a reader that will never finish (that would hold it, and answer
    * `'in-flight'`, forever).
+   *
+   * The bound is per WAIT, not per call: a waiter that wakes with `null` (its
+   * buyer's payer declined) and finds another buyer waits again, so k
+   * declines in a row add up to k × `timeoutMs`.
+   *
+   * ⚠️ The give-up is a `DescribeTimeout`, which says `serviceFault: true`,
+   * and here the slow party is the caller's OWN payer, not describe.net. The
+   * paid routes never fail open, so nothing is swallowed — but a consumer
+   * that pages on `serviceFault` will page "describe.net is down" for its own
+   * slow approval. Its message names the payer. (A kind of its own would be a
+   * taxonomy change; not made here.)
    */
   private async waitFor(path: string, acquiring: Acquiring): Promise<HeldAuthorization | null> {
     acquiring.waiting += 1;
@@ -1482,9 +1519,16 @@ export class DescribeClient {
       clearTimeout(timer);
     }
     if (outcome !== 'gave-up') return outcome;
-    // The clock and the signature can land in the same turn, the clock's
-    // reaction first: if the authorization was held meanwhile, this call was
-    // counted among its readers and must send it.
+    // If the authorization was held between the clock firing and this line,
+    // this call was counted among its readers and must send it. That only
+    // happens under SYNCHRONOUS timer batching — fake timers that fire both
+    // callbacks with no microtask checkpoint in between, like vitest's
+    // `advanceTimersByTime` in a consumer's suite. Node and browsers drain
+    // microtasks between timers, so there the waiter gives up before the hold
+    // and is never counted (measured by the round's refuter, vuelta 2: with
+    // `advanceTimersByTimeAsync` and with real timers, the next read is a new
+    // purchase and the books close). Cheap, and it keeps the count right in
+    // both worlds.
     if (acquiring.outcome !== undefined) return acquiring.outcome;
     acquiring.waiting -= 1;
     throw new DescribeTimeout(
@@ -1595,6 +1639,7 @@ export class DescribeClient {
       // them sends it, and none of them may find it let go before it has.
       readers: 1 + acquiring.waiting,
       owed: 0,
+      delivered: 0,
     };
     this.#held.set(path, authorization);
     // In the SAME synchronous block that counted the waiters into `readers`:
@@ -1661,6 +1706,7 @@ export class DescribeClient {
    */
   private end(path: string, authorization: HeldAuthorization, ending: Ending): void {
     authorization.readers -= 1;
+    if (ending === 'delivered') authorization.delivered += 1;
     if (ending === 'owed') {
       authorization.owed += 1;
       return;
@@ -1774,7 +1820,14 @@ export class DescribeClient {
           `GET ${path} -> HTTP ${second.status}` +
             `${attempt.serverError ? ` ${attempt.serverError}` : ''} AFTER paying ` +
             `(settlement: ${attempt.settlement}${receipt ? `, receipt ${receipt}` : ''}). ` +
-            adviceAfterPaying(attempt),
+            adviceAfterPaying(attempt) +
+            // A held authorization is re-sent to every later call for its
+            // resource (`owed`), and past describe.net's receipt window that
+            // re-send answers 409. When this client already DELIVERED a read
+            // with it, that 409 is known and harmless, and it must not reach
+            // the integrator as one more "may have moved money" (c0der,
+            // ratifying `owed`, 2026-11-16).
+            (second.status === 409 && authorization.delivered > 0 ? ALREADY_DELIVERED_409 : ''),
           // The most expensive door gets the reason too: a 4xx/5xx AFTER money
           // moved is exactly where "what did they SAY" matters most.
           { serverReason: reasonOf(record, header) },

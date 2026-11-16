@@ -1399,6 +1399,8 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(first.payment.resend).toBe('reconcile');
     expect(first.payment.retryable).toBe(false);
     expect(first.message).toContain('forgetAuthorization');
+    // Never delivered: this 409 IS a payment in doubt, and must not say otherwise.
+    expect(first.message).not.toContain('already delivered');
     // 300 s from expiring, it can still execute: refused, whatever the caller thinks.
     expect(client.forgetAuthorization(first)).toBe('may-still-execute');
     vi.setSystemTime(T0_MS + (300 + AUTHORIZATION_EXPIRY_MARGIN_SECONDS - 1) * 1000);
@@ -2097,6 +2099,54 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(await d).toMatchObject({ finalScore: 83.0 });
   });
 
+  it('MOUNTS THE BAD STATE: an owed read re-sent past the receipt window gets a 409 that says the authorization already delivered a read and names forgetAuthorization — not one more "may have moved money"', async () => {
+    // c0der, ratifying `owed` (2026-11-16): the 409 describe.net answers to a
+    // re-send past its receipt window must not reach the integrator as a mute
+    // error. The smaller of the two options offered, with its test: a typed
+    // 409 whose message names the way out (the other, forgetting and buying
+    // again on its own, would make a second payment a reflex).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const validBefore = T0_MS / 1000 + 60;
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer(validBefore);
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    parked[0](unconfirmed()); // `a` gets the 503: its read is owed
+    await caughtPaid(a.then(rethrown));
+    parked[1](delivered()); // `b` is delivered: the authorization SETTLED
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+
+    // 31 minutes later — past the longest receipt window (1800 s) — the next
+    // read claims the owed one and re-sends it.
+    vi.setSystemTime(T0_MS + 31 * 60_000);
+    const late = call();
+    await flushTasks();
+    expect(sent[2]).toBe(sent[0]);
+    parked[2](reply(409, { error: 'authorization_already_settled', retryable: false }));
+    const err = await caughtPaid(late.then(rethrown));
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    expect(err.status).toBe(409);
+    expect(err.payment.resend).toBe('reconcile');
+    expect(err.message).toContain('already delivered a read paid with this authorization');
+    expect(err.message).toContain('forgetAuthorization(error)');
+    expect(pay).toHaveBeenCalledTimes(1);
+
+    // The way out works as the message says: forgotten, and the next call buys.
+    expect(client.forgetAuthorization(err)).toBe('forgotten');
+    const again = call();
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(sent[3]).not.toBe(sent[0]);
+    parked[3](delivered());
+    expect(await again).toMatchObject({ finalScore: 83.0 });
+  });
+
   it('MOUNTS THE BAD STATE: the free ask is never single-flight — five reads the route answers for free run side by side, and four that time out fail together', async () => {
     // P2-A of this round's own refuter, measured on its first draft (which
     // put the single-flight before the free ask): the partner rail, where the
@@ -2232,13 +2282,20 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(pay).toHaveBeenCalledTimes(1);
   });
 
-  it("MOUNTS THE BAD STATE: when a waiter's clock and the signature land in the same turn, the waiter that was counted sends the authorization instead of giving up", async () => {
-    // The clock's reaction runs first, the payer's right after it, and the
-    // payer's continuation counts the waiter into `readers` before the
-    // waiter's continuation reads the clock. `acquiring.outcome`, set in that
-    // same block, is what tells the waiter it was counted. Without it the
-    // waiter throws a timeout, and the authorization keeps a reader that will
-    // never finish: held for ever, `'in-flight'` for ever.
+  it("MOUNTS THE BAD STATE: under synchronous timer batching (fake timers in a consumer's suite), a waiter whose clock and the signature land in the same turn sends the authorization instead of giving up", async () => {
+    // `vi.advanceTimersByTime` fires both callbacks with no microtask
+    // checkpoint in between: the clock's reaction is queued first, the
+    // payer's right after it, and the payer's continuation counts the waiter
+    // into `readers` before the waiter's continuation reads the clock.
+    // `acquiring.outcome`, set in that same block, is what tells the waiter it
+    // was counted. Without it the waiter throws a timeout, and the
+    // authorization keeps a reader that will never finish: held for ever,
+    // `'in-flight'` for ever.
+    // ⚠️ Node and browsers drain microtasks between timers, so in production
+    // this turn does not happen: the waiter gives up BEFORE the hold, is
+    // never counted, and the next read is a new purchase (measured by the
+    // round's refuter, vuelta 2, with `advanceTimersByTimeAsync` and with real
+    // timers). The guard is for suites that batch timers synchronously.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const drain = async () => {
       for (let i = 0; i < 200; i++) await Promise.resolve();
