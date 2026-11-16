@@ -25,7 +25,7 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **381 tests** on 2026-11-16, Node 20.20.2, in 2,7–3,0 s on the Windows host (0.6.0 after c0der's round 1: 8 more in `tras pagar` — `R1`–`R3`, the 15 s margin, the endings that are over, the authorization that never comes back — and the two clock literals in `config.test.ts`; the duration is not comparable with the next figure, measured on the Mac). Before: **372 tests in ~1,4 s** the same day, Node 20.20.2 (0.6.0 — the held authorization, F-A2: 27 in the `tras pagar` block of `client.test.ts`). Before: **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **384 tests** on 2026-11-16, Node 20.20.2, on the Windows host (0.6.0 after c0der's round 1: 11 more in `tras pagar` — `R1`–`R3`, the 15 s margin, the endings that are over, the authorization that never comes back, the free ask that is never single-flight, the waiter that gives up, and the waiter whose clock lands with the signature — and the two clock literals in `config.test.ts`). Duration NOT measured cleanly: 2,7–3,0 s at 381 tests and 6,4–7,2 s at 384 the same afternoon on a loaded machine, with vitest's `tests` share at 2,8–3,4 s both times; not comparable with the next figure, measured on the Mac. Before: **372 tests in ~1,4 s** the same day, Node 20.20.2 (0.6.0 — the held authorization, F-A2: 27 in the `tras pagar` block of `client.test.ts`). Before: **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, four entries (`index`, `x402/index`, `partner/index`, `widget/index`; this row said "two" until 0.5.0) |
@@ -258,13 +258,22 @@ pay, deliberately.
    others — and every one of them goes red in the `tras pagar` block of
    `client.test.ts` (`npx vitest run src/client.test.ts -t "tras pagar"`).
    🔴 **And two calls for one resource sign ONCE** (c0der's round 1 of the same
-   day, P1-1): `#acquiring` makes the free ask, the challenge and the payer
-   single-flight per path, and a delivery never lets go of a read another call
-   is owed — the next call re-sends it (`auth.md:385-386`). Without that, a
+   day, P1-1): `#acquiring` makes the challenge and the payer single-flight
+   per path, and a delivery never lets go of a read another call is owed —
+   the next call re-sends it (`auth.md:385-387`). Without that, a
    `Promise.all` of two reads signed twice, the second overwrote the first in
    `#held`, and the `503` one's retry signed a THIRD: three payments for two
    reads, measured by the refuter. The tests are `R1`–`R3` in the same block;
    `R1` runs both delivery orders because each is a different guard.
+   ⚠️ **The free ask stays OUT of the single-flight, and a waiter gives up
+   after `timeoutMs`.** The round's first draft put the free ask inside and
+   waited with no limit, and its refuter measured both: the partner rail's
+   free answers and an outage's timeouts ran one call at a time (P2-A), and a
+   payer that never answered hung every later call for the resource (P2-B).
+   The bound has a sharp edge, mounted by a test: a waiter is counted into
+   `readers` when the authorization is held, so one whose clock fires in that
+   same turn must SEND it (`Acquiring.outcome`), never give up — a reader that
+   never finishes holds the authorization, and answers `'in-flight'`, forever.
 
 ## Measured traps
 

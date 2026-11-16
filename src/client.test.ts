@@ -1870,7 +1870,9 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
 
       for (const result of results) expect(result, label).toMatchObject({ finalScore: 83.0 });
       expect(pay, label).toHaveBeenCalledTimes(1);
-      expect(server.freeAsks(), label).toBe(1); // the second call did not even ask for a challenge
+      // Both asked — the free ask is never single-flight, it costs nothing —
+      // and the second 402 found the first call buying.
+      expect(server.freeAsks(), label).toBe(2);
       expect(server.sends, label).toHaveLength(3);
       expect(new Set(server.sends).size, label).toBe(1); // one authorization, sent three times
       expect(server.sends[0], label).toBe(await pay.mock.results[0].value);
@@ -1896,7 +1898,7 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     // so the NEXT read is a new purchase — the owed count went back to zero.
     await client.walletBreakdown(KNOWN);
     expect(pay).toHaveBeenCalledTimes(2);
-    expect(server.freeAsks()).toBe(2);
+    expect(server.freeAsks()).toBe(3); // the two at once, and this one
     expect(server.sends[4]).not.toBe(server.sends[0]);
   });
 
@@ -1921,8 +1923,9 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(pay).toHaveBeenCalledTimes(1); // `a` is inside the payer, waiting for a human
     const b = client.walletBreakdown(KNOWN);
     await flushTasks();
-    // `b` had every chance to ask and to pay on its own while `a` waited.
-    expect(server.freeAsks()).toBe(1);
+    // `b` had every chance to pay on its own while `a` waited: it asked (free),
+    // got its 402, found `a` buying, and is waiting for that signature.
+    expect(server.freeAsks()).toBe(2);
     expect(pay).toHaveBeenCalledTimes(1);
 
     approve();
@@ -1968,7 +1971,8 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(rc.finalScore).toBe(83.0);
     // One declined, one signed — not one per waiter, and nobody left hanging.
     expect(pay).toHaveBeenCalledTimes(2);
-    expect(server.freeAsks()).toBe(2);
+    // One free ask each: the waiter that bought next used the 402 it had.
+    expect(server.freeAsks()).toBe(3);
     expect(server.sends).toHaveLength(2);
     expect(server.sends[1]).toBe(server.sends[0]);
   });
@@ -2091,6 +2095,136 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     parked[3](delivered());
     expect(await c).toMatchObject({ finalScore: 83.0 });
     expect(await d).toMatchObject({ finalScore: 83.0 });
+  });
+
+  it('MOUNTS THE BAD STATE: the free ask is never single-flight — five reads the route answers for free run side by side, and four that time out fail together', async () => {
+    // P2-A of this round's own refuter, measured on its first draft (which
+    // put the single-flight before the free ask): the partner rail, where the
+    // metered route answers 200 for free, ran five concurrent reads ONE at a
+    // time, and four reads during an outage failed at 1x..4x `timeoutMs`.
+    // Counted at the fetch, so the assertion is the concurrency itself, not a
+    // clock on a loaded machine.
+    let open = 0;
+    let peak = 0;
+    const freeFetch = (async () => {
+      open += 1;
+      peak = Math.max(peak, open);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      open -= 1;
+      return reply(200, WALLET_BREAKDOWN);
+    }) as typeof fetch;
+    const free = testClient({ fetchImpl: freeFetch, payer: { pay: spyPayer() } });
+    const reads = await Promise.all(Array.from({ length: 5 }, () => free.walletBreakdown(KNOWN)));
+    for (const read of reads) expect(read.finalScore).toBe(83.0);
+    expect(peak).toBe(5);
+
+    // An outage: nothing answers, and each request dies on its own timer.
+    let hanging = 0;
+    let hangPeak = 0;
+    const deadFetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        hanging += 1;
+        hangPeak = Math.max(hangPeak, hanging);
+        init?.signal?.addEventListener('abort', () => {
+          hanging -= 1;
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      })) as typeof fetch;
+    const dead = testClient({ fetchImpl: deadFetch, timeoutMs: 50, payer: { pay: spyPayer() } });
+    const failures = await Promise.all(
+      Array.from({ length: 4 }, () => dead.walletBreakdown(KNOWN).catch((e: unknown) => e)),
+    );
+    for (const failure of failures) {
+      expect(failure).toBeInstanceOf(DescribeError);
+      expect((failure as DescribeError).kind).toBe('timeout');
+      expect(failedAfterPaying(failure)).toBe(false); // the free ask: nothing was sent
+    }
+    expect(hangPeak).toBe(4);
+  });
+
+  it('MOUNTS THE BAD STATE: a payer that never answers does not hang every later call — the waiter gives up after timeoutMs having sent and paid nothing, and is not counted when the signature finally comes', async () => {
+    // P2-B of this round's own refuter, measured on its first draft (an
+    // unbounded wait): "b: still waiting after 1 s | c: still waiting after
+    // 0.5 s", with no error to hand to `forgetAuthorization()`.
+    let approve: () => void = () => undefined;
+    const approved = new Promise<void>((resolve) => {
+      approve = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let signed = 0;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      if (signed === 0) await approved; // the first approval is the one nobody gives (yet)
+      return envelope(++signed, validBefore);
+    });
+    const server = scripted([delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, timeoutMs: 50, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    const waited = await client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    expect(waited).toBeInstanceOf(DescribeError);
+    expect((waited as DescribeError).kind).toBe('timeout');
+    expect(failedAfterPaying(waited)).toBe(false); // it sent nothing and paid nothing
+    expect((waited as Error).message).toContain('sent nothing');
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(0);
+
+    // The approval comes at last. The waiter that gave up is NOT among the
+    // readers: the delivery lets the authorization go, and the waiter's retry
+    // is a new purchase — not a re-send of `a`'s, held forever by a reader
+    // that will never finish.
+    approve();
+    expect((await a).finalScore).toBe(83.0);
+    expect((await client.walletBreakdown(KNOWN)).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).not.toBe(server.sends[0]);
+  });
+
+  it("MOUNTS THE BAD STATE: when a waiter's clock and the signature land in the same turn, the waiter that was counted sends the authorization instead of giving up", async () => {
+    // The clock's reaction runs first, the payer's right after it, and the
+    // payer's continuation counts the waiter into `readers` before the
+    // waiter's continuation reads the clock. `acquiring.outcome`, set in that
+    // same block, is what tells the waiter it was counted. Without it the
+    // waiter throws a timeout, and the authorization keeps a reader that will
+    // never finish: held for ever, `'in-flight'` for ever.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const drain = async () => {
+      for (let i = 0; i < 200; i++) await Promise.resolve();
+    };
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let sign: (header: string) => void = () => undefined;
+    const pay = vi.fn(
+      (_challenge: X402Challenge) =>
+        new Promise<string>((resolve) => {
+          sign = resolve;
+        }),
+    );
+    const server = scripted([delivered, delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, timeoutMs: 50, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN);
+    await drain();
+    expect(pay).toHaveBeenCalledTimes(1); // `a` is inside its payer
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await drain(); // `b` got its 402 and is waiting, its clock due at +50 ms
+    // Scheduled AFTER `b`'s clock with the same deadline: it fires right after it.
+    setTimeout(() => sign(envelope(1, validBefore)), 50);
+    vi.advanceTimersByTime(50);
+    await drain();
+
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+    expect((await a).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).toBe(server.sends[0]);
+    // Both readers finished: it was let go, and the next read is a purchase.
+    const next = client.walletBreakdown(KNOWN);
+    await drain();
+    expect(pay).toHaveBeenCalledTimes(2);
+    sign(envelope(2, validBefore));
+    await drain();
+    expect((await next).finalScore).toBe(83.0);
   });
 
   it('serverError is capped at 120 chars and nextAction at 600 — server-written text, not a place for a whole body', async () => {

@@ -110,9 +110,9 @@ went out two hours before this change was proposed.
 - `recovery` keeps its frozen text (shared with the Python twin). After a
   payment, read `payment.resend` first.
 - Nothing is re-sent on its own. Two concurrent calls for the same resource
-  now share one authorization — from the first instant: a call that arrives
-  while another is still asking, reading the challenge or waiting on its payer
-  waits for that signature instead of buying its own.
+  now share one authorization — from the first instant: a call whose free ask
+  comes back 402 while another is reading the challenge or waiting on its
+  payer waits for that signature (up to `timeoutMs`) instead of buying its own.
   ⚠️ The first half of that sentence was all this line said until c0der's
   round 1 (P1-1), and it was true only once the first call was back from
   `payer.pay()`: two calls in the same tick both signed, the second overwrote
@@ -121,29 +121,42 @@ went out two hours before this change was proposed.
 
 ### Fixed in review — c0der's round 1 (2026-11-16) [money]
 
-- **Single-flight per resource**: the free ask, the challenge and the payer run
-  once for concurrent calls; the others wait for that signature and send it
-  (`DescribeClient.#acquiring`). If that call ends without one (a free answer,
-  a payer that declined, a failure before paying), the waiters start over —
-  nothing was spent — and share the next signature.
+- **Single-flight per resource, from the 402 on**: the challenge and the
+  payer run once for concurrent calls; the others wait for that signature and
+  send it (`DescribeClient.#acquiring`). If that call ends without one (a payer
+  that declined, a failure before paying), the waiters look again and the
+  first of them buys with the 402 it already has — nothing was spent. The
+  free ask is NOT single-flight: the round's own first draft made it so, and
+  its refuter measured every answer that buys nothing — the partner rail's
+  free 200, a timeout during an outage — running one call at a time (P2-A).
+- **A waiter gives up after `timeoutMs`** with a `DescribeTimeout` that
+  carries no `payment` (it sent and paid nothing), and is taken out of the
+  count before it throws. Without the bound, a payer that never answered left
+  every later call for that resource waiting forever (P2-B of the same
+  refuter). `X402Payer.pay()` is documented to resolve or throw.
 - **A delivery no longer lets go of a read another call is owed**. Each held
   authorization counts the calls reading it and the reads it bought that were
   never handed over; a delivery releases it only when both are zero, and the
   next call for that resource claims an owed read by re-sending it —
   describe.net's *"re-send the same header to the request you signed it for"*
-  (`describe-net/site/auth.md:385-386`), served from its receipt for free
+  (`describe-net/site/auth.md:385-387`), served from its receipt for free
   (`auth.md:342-345`). Before, two calls sharing one authorization, one `503`
   and one delivery: the delivery let go, and the `503` one's retry signed a new
   one.
 - `forgetAuthorization()` answers `'in-flight'` while any call that took the
   authorization has not finished (was: while a send of it was unanswered).
 - Tests that pin two guards whose mutants survived the first review: the
-  `sent` counter counts a send when it leaves (`R3`: the first send answered
-  `payment_required` while a re-send of the same header is out stays held),
-  and `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` is the literal 15 of describe.net's
+  `sent` counter counts a send when a call commits to it, never when its
+  answer arrives (`R3`: the first send answered `payment_required` while a
+  re-send of the same header is out stays held), and
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` is the literal 15 of describe.net's
   `dn-pay.js:714`.
 
-## Unreleased (DN-PUB-01, no version bump)
+## DN-PUB-01 — on `main` since 2026-09-30, no version bump; first shipped in 0.5.0 (2026-11-16)
+
+This heading read *"Unreleased (DN-PUB-01, no version bump)"* until c0der's
+round 1 of 2026-11-16: 0.5.0 was published from a `main` that already carried
+it.
 
 ### Changed
 

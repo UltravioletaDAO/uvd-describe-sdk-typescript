@@ -198,6 +198,12 @@ export interface X402Payer {
   /**
    * Given the parsed 402 challenge, return the value for the `X-PAYMENT`
    * header. Throwing aborts the call — nothing is replayed.
+   *
+   * It must RESOLVE OR THROW. While it is pending, every other call this
+   * client makes for the same resource waits for its signature instead of
+   * signing its own — each for up to `timeoutMs`, then a `DescribeTimeout`
+   * that sent and paid nothing (since 0.6.0; see `DescribeClient.#acquiring`).
+   * A payer that waits on a human should carry its own deadline.
    */
   pay(challenge: X402Challenge): Promise<string>;
 }
@@ -649,7 +655,7 @@ interface HeldAuthorization {
    * this resource claims one (`join`) — it is that read, re-sent, which is
    * describe.net's rule: *"Do not sign a fresh authorization to recover a read
    * you already paid for: re-send the same header to the request you signed it
-   * for"* (`describe-net/site/auth.md:385-386`). A delivery lets the
+   * for"* (`describe-net/site/auth.md:385-387`). A delivery lets the
    * authorization go only when nobody is reading it and nothing is owed.
    *
    * Added 2026-11-16 (c0der's round 1, P1-1). Measured before it: two calls
@@ -664,11 +670,13 @@ interface HeldAuthorization {
    * answered `payment_required` says nothing about the other send of the same
    * header that got a 503 (the refuter's P3 of 2026-11-16).
    *
-   * 🔴 Counted when the send LEAVES, not when its answer arrives (c0der's
-   * round 1, P2-1, mutant MR14). Counted at the answer, a first send answered
-   * `payment_required` while a second send of the same header is still out
-   * reads as "sent once" and lets the authorization go — while the other send
-   * may be settling.
+   * 🔴 Counted when a call COMMITS to sending it — on entering
+   * `sendAndRead`, before the jitter and the request — never when its answer
+   * arrives (c0der's round 1, P2-1, mutant MR14). Counted at the answer, a
+   * first send answered `payment_required` while a second send of the same
+   * header is still out reads as "sent once" and lets the authorization go —
+   * while the other send may be settling. Counting a little early errs on the
+   * side that keeps it held.
    */
   sent: number;
 }
@@ -678,10 +686,16 @@ interface HeldAuthorization {
  * Lives only in `DescribeClient.#acquiring`.
  */
 interface Acquiring {
-  /** What the buying call held, or `null` when it held nothing (a free answer, a failure before paying). */
+  /** What the buying call held, or `null` when it held nothing (its payer declined, a failure before paying). */
   readonly settled: Promise<HeldAuthorization | null>;
   /** Calls waiting on it. Counted into `readers` the moment an authorization is held. */
   waiting: number;
+  /**
+   * The same answer as `settled`, readable synchronously: set in the block
+   * that holds the authorization, `undefined` while the buying call is still
+   * at it. A waiter whose clock ran out reads it before giving up.
+   */
+  outcome: HeldAuthorization | null | undefined;
 }
 
 /** How one call that sent an authorization ended for it — see `DescribeClient.end`. */
@@ -838,11 +852,11 @@ export class DescribeClient {
    * re-sends the first one's authorization instead of buying the read again,
    * and may meet `503 authorization_in_flight` while the first settles — and
    * that is true from the first instant, not only once the first call is past
-   * its payer: a call that arrives while another is still asking, reading the
-   * challenge or waiting on the payer waits for THAT signature (`#acquiring`)
-   * instead of buying its own. A delivery lets it go only when every call that
-   * took it was served (`HeldAuthorization.owed`). A new `DescribeClient`
-   * holds nothing.
+   * its payer: a call whose free ask comes back 402 while another is reading
+   * the challenge or waiting on its payer waits for THAT signature
+   * (`#acquiring`, at most `timeoutMs`) instead of buying its own. A delivery
+   * lets it go only when every call that took it was served
+   * (`HeldAuthorization.owed`). A new `DescribeClient` holds nothing.
    *
    * ⚠️ Corrected 2026-11-16 (c0der's round 1, P1-1), and the old claim is left
    * because it is what the code did not do: this paragraph read *"Two calls
@@ -856,10 +870,18 @@ export class DescribeClient {
   readonly #held = new Map<string, HeldAuthorization>();
   /**
    * The signature being bought for a resource right now, so a second call for
-   * it waits for that one instead of asking its own challenge and paying its
-   * own (single-flight). Set before the free ask, cleared in the same tick the
-   * authorization is held — or as soon as the buying call ends without
-   * holding anything, when the waiters start over: nothing was spent.
+   * it waits for that one instead of having its payer sign its own
+   * (single-flight from the 402 on). Set the moment a call's free ask comes
+   * back 402 and finds nothing held and nobody buying; cleared once the
+   * authorization is held — or as soon as the buying call ends without one,
+   * when the waiters look again: nothing was spent.
+   *
+   * ⚠️ The free ask itself is NOT single-flight, and the first draft of this
+   * round put it inside: every outcome that buys nothing — the free answer
+   * the partner rail gets, a timeout during an outage — then ran one call at
+   * a time (measured by the round's refuter, P2-A). A waiter gives up after
+   * `timeoutMs`, having sent nothing (P2-B: a payer that never answered left
+   * every later call waiting forever).
    */
   readonly #acquiring = new Map<string, Acquiring>();
   /**
@@ -1365,76 +1387,31 @@ export class DescribeClient {
    * earlier call and that call did not see it through — it is re-sent as is,
    * with no free ask, no challenge and no payer before it. See `#held`.
    *
-   * And since c0der's round 1 of the same day (P1-1), if another call is in
-   * the middle of buying one for this resource — asking, reading the
-   * challenge, waiting on the payer — this call waits for that signature
-   * instead of buying its own. See `#acquiring`.
+   * And since c0der's round 1 of the same day (P1-1), if this call's free ask
+   * comes back 402 while another call is buying one for this resource —
+   * reading the challenge, waiting on the payer — this call waits for that
+   * signature (at most `timeoutMs`) instead of buying its own. See
+   * `#acquiring`.
    */
   private async getPaidJson<T>(
     path: string,
     parse: (body: unknown, payment: PaymentEvidence | null) => T,
   ): Promise<{ result: T; servedReceipt: string | null }> {
-    for (;;) {
-      const held = this.#held.get(path);
-      if (held) {
-        // An authorization for THIS resource already left and was not seen
-        // through. Re-send it — no new 402, no payer, no signature: the
-        // treasury was checked when it was signed, and asking again would only
-        // lead to the second authorization this branch exists to prevent.
-        return this.sendPaid(path, join(held), parse);
-      }
-      const acquiring = this.#acquiring.get(path);
-      if (!acquiring) break;
-      // Another call is buying one for this resource right now. Its signature
-      // is this call's too: asking for a challenge of our own here is how two
-      // calls in the same tick signed twice and the second overwrote the
-      // first in `#held` (c0der's round 1, P1-1 — measured with `Promise.all`
-      // and with a payer slow enough to approve by hand).
-      acquiring.waiting += 1;
-      const bought = await acquiring.settled;
-      // Counted among its readers when it was held: nothing to join.
-      if (bought) return this.sendPaid(path, bought, parse);
-      // It held nothing — a free answer, or a failure before any payment.
-      // Start over: whatever that call learned cost nothing, and asking again
-      // costs nothing either.
+    const held = this.#held.get(path);
+    if (held) {
+      // An authorization for THIS resource already left and was not seen
+      // through. Re-send it — no new 402, no payer, no signature: the
+      // treasury was checked when it was signed, and asking again would only
+      // lead to the second authorization this branch exists to prevent.
+      return this.sendPaid(path, join(held), parse);
     }
 
-    let settle: (authorization: HeldAuthorization | null) => void = () => undefined;
-    const acquiring: Acquiring = {
-      settled: new Promise<HeldAuthorization | null>((resolve) => {
-        settle = resolve;
-      }),
-      waiting: 0,
-    };
-    // Set BEFORE the first await, so a call that arrives during the free ask
-    // already finds it.
-    this.#acquiring.set(path, acquiring);
-    let bought: HeldAuthorization | { result: T; servedReceipt: null } | null = null;
-    try {
-      bought = await this.buy(path, parse, acquiring);
-    } finally {
-      // Every way out lands here, so a waiter is never left hanging. A call
-      // that arrives between the hold (inside `buy`) and this line finds the
-      // authorization in `#held`, which is checked first, and joins it there.
-      this.#acquiring.delete(path);
-      settle(bought !== null && !('result' in bought) ? bought : null);
-    }
-    if ('result' in bought) return bought;
-    return this.sendPaid(path, bought, parse);
-  }
-
-  /**
-   * Ask free, read the challenge, check who is paid, have the payer sign, and
-   * HOLD what it signed — counting the calls waiting on it as its readers.
-   * Returns the free answer instead when the route answered without a charge.
-   * Nothing in here has spent anything until the very last line, and nothing
-   * in here sends the authorization: that is `sendPaid`'s.
-   */
-  private async buy<T>(
-    path: string,
-    parse: (body: unknown, payment: PaymentEvidence | null) => T,
-    acquiring: Acquiring,
-  ): Promise<HeldAuthorization | { result: T; servedReceipt: null }> {
+    // The free ask is NEVER single-flight: it costs nothing, and making
+    // concurrent calls wait on it serialised every answer that buys nothing.
+    // Measured by the round's own refuter on the first draft, which put the
+    // single-flight here: five partner-rail reads that the route answers free
+    // ran ONE at a time (127, 228, 330, 432, 534 ms against ~134 ms each), and
+    // four reads during an outage failed at 1x, 2x, 3x and 4x `timeoutMs`.
     const first = await this.request(path);
 
     if (first.ok) {
@@ -1455,6 +1432,108 @@ export class DescribeClient {
       });
     }
 
+    // A 402: this read costs money. Another call may have bought — or be
+    // buying — this resource while this one asked. Everything from here to
+    // `buy` setting `#acquiring` is synchronous, so two calls cannot both find
+    // nobody buying.
+    for (;;) {
+      const bought = this.#held.get(path);
+      if (bought) return this.sendPaid(path, join(bought), parse);
+      const acquiring = this.#acquiring.get(path);
+      if (!acquiring) break;
+      // Its signature is this call's too: asking the payer here is how two
+      // calls in the same tick signed twice and the second overwrote the
+      // first in `#held` (c0der's round 1, P1-1 — measured with `Promise.all`
+      // and with a payer slow enough to approve by hand).
+      const theirs = await this.waitFor(path, acquiring);
+      // Counted among its readers when it was held: nothing to join.
+      if (theirs) return this.sendPaid(path, theirs, parse);
+      // It held nothing — its payer declined, or it failed before paying.
+      // Look again: another waiter may be buying now; if not, this call buys,
+      // with the 402 it already has. Nothing was spent.
+    }
+    return this.buy(path, first, parse);
+  }
+
+  /**
+   * Wait for the signature another call is buying for this resource — at most
+   * `timeoutMs`, and then give up having sent nothing.
+   *
+   * Bounded since the round's refuter measured the first draft, which waited
+   * with no limit: a payer that never answers (an approval nobody gives, a
+   * remote signer with no timeout of its own) left every later call for that
+   * resource waiting forever — *"b: still waiting after 1 s | c: still
+   * waiting after 0.5 s"* — with no error to hand to `forgetAuthorization()`
+   * and no way out but a new client. Giving up takes this call OUT of
+   * `waiting` before it throws, so the authorization held later does not
+   * count a reader that will never finish (that would hold it, and answer
+   * `'in-flight'`, forever).
+   */
+  private async waitFor(path: string, acquiring: Acquiring): Promise<HeldAuthorization | null> {
+    acquiring.waiting += 1;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<'gave-up'>((resolve) => {
+      timer = setTimeout(() => resolve('gave-up'), this.timeoutMs);
+    });
+    let outcome: HeldAuthorization | null | 'gave-up';
+    try {
+      outcome = await Promise.race([acquiring.settled, gaveUp]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome !== 'gave-up') return outcome;
+    // The clock and the signature can land in the same turn, the clock's
+    // reaction first: if the authorization was held meanwhile, this call was
+    // counted among its readers and must send it.
+    if (acquiring.outcome !== undefined) return acquiring.outcome;
+    acquiring.waiting -= 1;
+    throw new DescribeTimeout(
+      `GET ${path}: another call has been buying the authorization for this resource for ` +
+        `${this.timeoutMs} ms and its payer has not answered. This call sent nothing and paid ` +
+        'nothing; calling again waits for that signature again, or sends it once it is held.',
+    );
+  }
+
+  /**
+   * Read the challenge, check who is paid, have the payer sign, HOLD what it
+   * signed — counting the calls waiting on it as its readers — and send it.
+   * Single-flight per resource from its first line (`#acquiring`). Nothing in
+   * here spends anything before the marked line.
+   */
+  private async buy<T>(
+    path: string,
+    first: Response,
+    parse: (body: unknown, payment: PaymentEvidence | null) => T,
+  ): Promise<{ result: T; servedReceipt: string | null }> {
+    let settle: (authorization: HeldAuthorization | null) => void = () => undefined;
+    const acquiring: Acquiring = {
+      settled: new Promise<HeldAuthorization | null>((resolve) => {
+        settle = resolve;
+      }),
+      waiting: 0,
+      outcome: undefined,
+    };
+    // In the same synchronous turn as the check that found nothing held and
+    // nobody buying (`getPaidJson`): no await between them.
+    this.#acquiring.set(path, acquiring);
+    let authorization: HeldAuthorization | null = null;
+    try {
+      authorization = await this.signAndHold(path, first, acquiring);
+    } finally {
+      // Every way out lands here, so a waiter is never left hanging. The hold
+      // (and `outcome`) happened inside `signAndHold`, at least one microtask
+      // ago: a call that arrived in between found the authorization in
+      // `#held`, which the 402 loop checks first, and joined it there. On a
+      // failure before paying the waiters wake with `null` and look again —
+      // the first of them buys with its own 402.
+      if (this.#acquiring.get(path) === acquiring) this.#acquiring.delete(path);
+      acquiring.outcome = authorization;
+      settle(authorization);
+    }
+    return this.sendPaid(path, authorization, parse);
+  }
+
+  private async signAndHold(path: string, first: Response, acquiring: Acquiring): Promise<HeldAuthorization> {
     const challenge = await this.readChallenge(first, path);
 
     // ── THE PARTNER RAIL FAILED, AND FAILING LOUDLY IS THE FEATURE ──────────
@@ -1518,6 +1597,11 @@ export class DescribeClient {
       owed: 0,
     };
     this.#held.set(path, authorization);
+    // In the SAME synchronous block that counted the waiters into `readers`:
+    // a waiter whose clock runs out after this line, but before `buy` wakes
+    // it, reads this and sends the authorization instead of giving up — it
+    // was counted, and a reader that never finishes would hold it forever.
+    acquiring.outcome = authorization;
     return authorization;
   }
 
@@ -1592,7 +1676,8 @@ export class DescribeClient {
     ending: { is: Ending },
   ): Promise<{ result: T; servedReceipt: string | null }> {
     const { header, terms, validBefore, nonce, network } = authorization;
-    // Counted here, as it LEAVES — see `HeldAuthorization.sent`.
+    // Counted here, when this call commits to sending it, before the jitter
+    // and the request — see `HeldAuthorization.sent`.
     authorization.sent += 1;
     const resent = () => authorization.sent > 1;
     const unanswered = {

@@ -424,12 +424,15 @@ try {
   (`redirect: 'manual'`): the Fetch standard strips `Authorization` on a
   cross-origin redirect and nothing else, so a `3xx` (status `0` in a browser)
   is an answer — `reconcile` — never a hop.
-* **Two calls at once for one resource sign once.** A call that arrives while
-  another is asking, reading the challenge or waiting on its payer (a human
-  approving it, say) waits for that signature and sends it too. If one of them
-  gets a `503` and the other is delivered, the `503` one's retry re-sends the
-  same authorization: its read was paid, and describe.net serves it again from
-  its receipt (*"re-send the same header to the request you signed it for"*,
+* **Two calls at once for one resource sign once.** Both ask for free, in
+  parallel; a call whose `402` arrives while another is reading the challenge
+  or waiting on its payer (a human approving it, say) waits for that signature
+  and sends it too. It waits at most `timeoutMs`, then throws a
+  `DescribeTimeout` with no `payment` — it sent and paid nothing, so calling
+  again is safe. Your `pay()` must resolve or throw. If one of them gets a
+  `503` and the other is delivered, the `503` one's retry re-sends the same
+  authorization: its read was paid, and describe.net serves it again from its
+  receipt (*"re-send the same header to the request you signed it for"*,
   [auth.md](https://describe.net/auth.md)). "Same resource" means the same
   string: `walletBreakdown('0xABC…')` and its lower-case spelling are two.
 * **It is let go** when the read is delivered and no other call that took it
