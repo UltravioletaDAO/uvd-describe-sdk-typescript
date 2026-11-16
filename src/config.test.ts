@@ -3,7 +3,15 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_TIMEOUT_MS, SDK_NAME, SDK_VERSION, TREASURY_EVM, userAgent } from './config';
+import {
+  AUTHORIZATION_EXPIRY_MARGIN_SECONDS,
+  DEFAULT_TIMEOUT_MS,
+  MAX_RETRY_AFTER_SECONDS,
+  SDK_NAME,
+  SDK_VERSION,
+  TREASURY_EVM,
+  userAgent,
+} from './config';
 
 const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
@@ -51,6 +59,19 @@ describe('the defaults are the measured ones', () => {
     // Read live from the 402 challenge on 2026-08-30. If describe.net rotates
     // it, this SDK stops paying until it is republished — the safe direction.
     expect(TREASURY_EVM).toBe('0xe4dc963c56979E0260fc146b87eE24F18220e545');
+  });
+
+  it("the two post-payment clocks are describe.net's numbers, typed as literals here", () => {
+    // Added 2026-11-16 (c0der's round 1, P2-2). The margin is the guard on
+    // the one door to a second payment (`forgetAuthorization`), and its only
+    // test computed the edge from this very constant, so 15 -> 0 passed the
+    // whole suite (mutant MR5). A literal is the only check that can go red.
+    // Source: `MARGEN_FIRMA_MS = 15000`, describe-net `site/dn-pay.js:714`.
+    expect(AUTHORIZATION_EXPIRY_MARGIN_SECONDS).toBe(15);
+    // Source: `RETRY_AFTER_CEILING_SECONDS = 30`, describe-net
+    // `describenet/paywall.py:179` (already pinned by behaviour: the
+    // `retryAfterSeconds` table in `client.test.ts` killed MR15, 30 -> 300).
+    expect(MAX_RETRY_AFTER_SECONDS).toBe(30);
   });
 });
 

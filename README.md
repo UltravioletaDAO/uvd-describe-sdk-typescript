@@ -424,8 +424,17 @@ try {
   (`redirect: 'manual'`): the Fetch standard strips `Authorization` on a
   cross-origin redirect and nothing else, so a `3xx` (status `0` in a browser)
   is an answer — `reconcile` — never a hop.
-* **It is let go** when the read is delivered (one authorization pays one read:
-  the next call is a new purchase), on the whitelist `402`, and when **you**
+* **Two calls at once for one resource sign once.** A call that arrives while
+  another is asking, reading the challenge or waiting on its payer (a human
+  approving it, say) waits for that signature and sends it too. If one of them
+  gets a `503` and the other is delivered, the `503` one's retry re-sends the
+  same authorization: its read was paid, and describe.net serves it again from
+  its receipt (*"re-send the same header to the request you signed it for"*,
+  [auth.md](https://describe.net/auth.md)). "Same resource" means the same
+  string: `walletBreakdown('0xABC…')` and its lower-case spelling are two.
+* **It is let go** when the read is delivered and no other call that took it
+  is still out or still owed its read (one authorization pays one read: the
+  next call is a new purchase), on the whitelist `402`, and when **you**
   call `describe.forgetAuthorization(err)`. 🔴 **Never by the clock.** Past
   `validBefore` the old authorization can no longer execute, so re-sending it
   costs nothing, and describe.net's answer to it is the only evidence of what
@@ -437,7 +446,7 @@ try {
   60 s: 76 s after a `500` with a receipt, measured.
 * **`forgetAuthorization(err)`** is paybox.md's *"past its `validBefore` … with
   no transfer on-chain"*. The client checks the half it can and answers why:
-  `'in-flight'` (a send of it is unanswered — wait), `'may-still-execute'`
+  `'in-flight'` (a call that took it has not finished — wait), `'may-still-execute'`
   (`validBefore` + 15 s has not passed, or is unknown; `{ force: true }`
   overrides only this one), `'not-held'` (nothing held for that error any more —
   pass the error this client threw, or one that wraps it in `cause`), or

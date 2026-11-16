@@ -630,15 +630,73 @@ interface HeldAuthorization {
   readonly nonce: string | null;
   readonly network: string | null;
   readonly terms: PaymentTerms;
-  /** Sends of it that have not been answered yet, by any call. */
-  inFlight: number;
+  /**
+   * Calls that took it and have not finished: the send is out, or its answer
+   * has not been classified yet. A call waiting on the signature is counted
+   * from the moment it is held (`#acquiring`), before it has sent anything —
+   * so no answer to another call can find it at zero while one is still on
+   * its way.
+   *
+   * ⚠️ Replaced `inFlight` on 2026-11-16 (c0der's round 1, P1-1). `inFlight`
+   * counted SENDS and dropped at the answer, before its body was read; a
+   * delivery that came in through that gap saw nobody else and let go of an
+   * authorization another call had just failed on.
+   */
+  readers: number;
+  /**
+   * Reads it bought that were never handed over: calls that took it and ended
+   * in a failure that keeps it (`same-header`, `reconcile`). The next call for
+   * this resource claims one (`join`) — it is that read, re-sent, which is
+   * describe.net's rule: *"Do not sign a fresh authorization to recover a read
+   * you already paid for: re-send the same header to the request you signed it
+   * for"* (`describe-net/site/auth.md:385-386`). A delivery lets the
+   * authorization go only when nobody is reading it and nothing is owed.
+   *
+   * Added 2026-11-16 (c0der's round 1, P1-1). Measured before it: two calls
+   * share one authorization, A gets `503 settlement_unconfirmed`, B is
+   * delivered, B's delivery let go, and A — retrying exactly as its error told
+   * it to — signed a new one. A's read had been paid and was never served.
+   */
+  owed: number;
   /**
    * How many times it has been SENT, by any call. Counted per authorization
    * and not per call, because two concurrent calls share one: a first send
    * answered `payment_required` says nothing about the other send of the same
    * header that got a 503 (the refuter's P3 of 2026-11-16).
+   *
+   * 🔴 Counted when the send LEAVES, not when its answer arrives (c0der's
+   * round 1, P2-1, mutant MR14). Counted at the answer, a first send answered
+   * `payment_required` while a second send of the same header is still out
+   * reads as "sent once" and lets the authorization go — while the other send
+   * may be settling.
    */
   sent: number;
+}
+
+/**
+ * A signature being bought for one resource, and the calls waiting for it.
+ * Lives only in `DescribeClient.#acquiring`.
+ */
+interface Acquiring {
+  /** What the buying call held, or `null` when it held nothing (a free answer, a failure before paying). */
+  readonly settled: Promise<HeldAuthorization | null>;
+  /** Calls waiting on it. Counted into `readers` the moment an authorization is held. */
+  waiting: number;
+}
+
+/** How one call that sent an authorization ended for it — see `DescribeClient.end`. */
+type Ending = 'delivered' | 'refused' | 'owed';
+
+/**
+ * One more call takes a held authorization: it claims a read the
+ * authorization owes, if there is one, and is counted as a reader either way.
+ * Synchronous on purpose — nothing may run between finding it held and
+ * counting the call (see `HeldAuthorization.owed`).
+ */
+function join(authorization: HeldAuthorization): HeldAuthorization {
+  if (authorization.owed > 0) authorization.owed -= 1;
+  authorization.readers += 1;
+  return authorization;
 }
 
 /** What replaces the header wherever it would otherwise be quoted. */
@@ -778,10 +836,32 @@ export class DescribeClient {
    *
    * Two calls for the same resource at the same time share it: the second
    * re-sends the first one's authorization instead of buying the read again,
-   * and may meet `503 authorization_in_flight` while the first settles. A new
-   * `DescribeClient` holds nothing.
+   * and may meet `503 authorization_in_flight` while the first settles — and
+   * that is true from the first instant, not only once the first call is past
+   * its payer: a call that arrives while another is still asking, reading the
+   * challenge or waiting on the payer waits for THAT signature (`#acquiring`)
+   * instead of buying its own. A delivery lets it go only when every call that
+   * took it was served (`HeldAuthorization.owed`). A new `DescribeClient`
+   * holds nothing.
+   *
+   * ⚠️ Corrected 2026-11-16 (c0der's round 1, P1-1), and the old claim is left
+   * because it is what the code did not do: this paragraph read *"Two calls
+   * for the same resource at the same time share it"* and stopped there. It
+   * held only if the second call started after the first was back from
+   * `payer.pay()`. Two calls in the same tick both found nothing held, both
+   * signed, and the second `set` overwrote the first; one 503 later the
+   * caller retrying as told signed a THIRD authorization — three payments for
+   * two reads, measured by the refuter with a spy payer.
    */
   readonly #held = new Map<string, HeldAuthorization>();
+  /**
+   * The signature being bought for a resource right now, so a second call for
+   * it waits for that one instead of asking its own challenge and paying its
+   * own (single-flight). Set before the free ask, cleared in the same tick the
+   * authorization is held — or as soon as the buying call ends without
+   * holding anything, when the waiters start over: nothing was spent.
+   */
+  readonly #acquiring = new Map<string, Acquiring>();
   /**
    * Which held authorization each post-payment failure was about, so
    * `forgetAuthorization(error)` can drop THAT one and never a newer one.
@@ -930,8 +1010,9 @@ export class DescribeClient {
    * or `authorizationState`). The second half is yours. The first half is
    * checked here:
    *
-   *   * `'in-flight'` — a send of that authorization has not been answered yet.
-   *     Never overridable: wait for the answer.
+   *   * `'in-flight'` — a call that took that authorization has not finished:
+   *     its send is unanswered, its answer is still being read, or it is
+   *     waiting to send it. Never overridable: wait for the answer.
    *   * `'may-still-execute'` — `validBefore` + `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`
    *     has not passed, or `validBefore` could not be read. Pass
    *     `{ force: true }` only when you KNOW it did not and will not execute
@@ -945,6 +1026,8 @@ export class DescribeClient {
    *
    * ⚠️ If the check finds the transfer — the read was paid and lost, past
    * describe.net's receipt window — forgetting buys a SECOND read, knowingly.
+   * And it drops the authorization for every call that shared it: a read it
+   * still owes another failed call is bought again too.
    *
    * Added 2026-11-16 (F-A2). A first version answered a bare `true` at any
    * time, and the 503 message pointed at it: the refuter's round 2 had it sign
@@ -966,7 +1049,7 @@ export class DescribeClient {
     }
     if (!entry || this.#held.get(entry.path) !== entry.authorization) return 'not-held';
     const { authorization } = entry;
-    if (authorization.inFlight > 0) return 'in-flight';
+    if (authorization.readers > 0) return 'in-flight';
     const executable =
       authorization.validBefore === null ||
       Date.now() < (authorization.validBefore + AUTHORIZATION_EXPIRY_MARGIN_SECONDS) * 1000;
@@ -1281,20 +1364,77 @@ export class DescribeClient {
    * client already holds an authorization for this resource — it left on an
    * earlier call and that call did not see it through — it is re-sent as is,
    * with no free ask, no challenge and no payer before it. See `#held`.
+   *
+   * And since c0der's round 1 of the same day (P1-1), if another call is in
+   * the middle of buying one for this resource — asking, reading the
+   * challenge, waiting on the payer — this call waits for that signature
+   * instead of buying its own. See `#acquiring`.
    */
   private async getPaidJson<T>(
     path: string,
     parse: (body: unknown, payment: PaymentEvidence | null) => T,
   ): Promise<{ result: T; servedReceipt: string | null }> {
-    const held = this.#held.get(path);
-    if (held) {
-      // An authorization for THIS resource already left and was not seen
-      // through. Re-send it — no new 402, no payer, no signature: the
-      // treasury was checked when it was signed, and asking again would only
-      // lead to the second authorization this branch exists to prevent.
-      return this.sendPaid(path, held, parse);
+    for (;;) {
+      const held = this.#held.get(path);
+      if (held) {
+        // An authorization for THIS resource already left and was not seen
+        // through. Re-send it — no new 402, no payer, no signature: the
+        // treasury was checked when it was signed, and asking again would only
+        // lead to the second authorization this branch exists to prevent.
+        return this.sendPaid(path, join(held), parse);
+      }
+      const acquiring = this.#acquiring.get(path);
+      if (!acquiring) break;
+      // Another call is buying one for this resource right now. Its signature
+      // is this call's too: asking for a challenge of our own here is how two
+      // calls in the same tick signed twice and the second overwrote the
+      // first in `#held` (c0der's round 1, P1-1 — measured with `Promise.all`
+      // and with a payer slow enough to approve by hand).
+      acquiring.waiting += 1;
+      const bought = await acquiring.settled;
+      // Counted among its readers when it was held: nothing to join.
+      if (bought) return this.sendPaid(path, bought, parse);
+      // It held nothing — a free answer, or a failure before any payment.
+      // Start over: whatever that call learned cost nothing, and asking again
+      // costs nothing either.
     }
 
+    let settle: (authorization: HeldAuthorization | null) => void = () => undefined;
+    const acquiring: Acquiring = {
+      settled: new Promise<HeldAuthorization | null>((resolve) => {
+        settle = resolve;
+      }),
+      waiting: 0,
+    };
+    // Set BEFORE the first await, so a call that arrives during the free ask
+    // already finds it.
+    this.#acquiring.set(path, acquiring);
+    let bought: HeldAuthorization | { result: T; servedReceipt: null } | null = null;
+    try {
+      bought = await this.buy(path, parse, acquiring);
+    } finally {
+      // Every way out lands here, so a waiter is never left hanging. A call
+      // that arrives between the hold (inside `buy`) and this line finds the
+      // authorization in `#held`, which is checked first, and joins it there.
+      this.#acquiring.delete(path);
+      settle(bought !== null && !('result' in bought) ? bought : null);
+    }
+    if ('result' in bought) return bought;
+    return this.sendPaid(path, bought, parse);
+  }
+
+  /**
+   * Ask free, read the challenge, check who is paid, have the payer sign, and
+   * HOLD what it signed — counting the calls waiting on it as its readers.
+   * Returns the free answer instead when the route answered without a charge.
+   * Nothing in here has spent anything until the very last line, and nothing
+   * in here sends the authorization: that is `sendPaid`'s.
+   */
+  private async buy<T>(
+    path: string,
+    parse: (body: unknown, payment: PaymentEvidence | null) => T,
+    acquiring: Acquiring,
+  ): Promise<HeldAuthorization | { result: T; servedReceipt: null }> {
     const first = await this.request(path);
 
     if (first.ok) {
@@ -1372,10 +1512,13 @@ export class DescribeClient {
         payTo: typeof challenge.recipient === 'string' ? challenge.recipient : undefined,
       },
       sent: 0,
-      inFlight: 0,
+      // This call, and every call that waited for this signature: each of
+      // them sends it, and none of them may find it let go before it has.
+      readers: 1 + acquiring.waiting,
+      owed: 0,
     };
     this.#held.set(path, authorization);
-    return this.sendPaid(path, authorization, parse);
+    return authorization;
   }
 
   /**
@@ -1394,13 +1537,62 @@ export class DescribeClient {
    * never held — and "before retrying", next to `transient: true`, read as
    * "retry", which signed a second authorization. Every message now says what
    * this client will do with the authorization, from `resend`.
+   *
+   * The caller has already counted this call among the authorization's
+   * `readers` (`join`, or the hold for the buying call and its waiters). What
+   * the call's ending does to the authorization is applied ONCE, in the
+   * `finally`, whatever way out it took — and it is `'owed'` unless the body
+   * proves otherwise, which keeps the authorization held: the side that
+   * cannot pay twice.
    */
   private async sendPaid<T>(
     path: string,
     authorization: HeldAuthorization,
     parse: (body: unknown, payment: PaymentEvidence | null) => T,
   ): Promise<{ result: T; servedReceipt: string | null }> {
+    const ending: { is: Ending } = { is: 'owed' };
+    try {
+      return await this.sendAndRead(path, authorization, parse, ending);
+    } finally {
+      this.end(path, authorization, ending.is);
+    }
+  }
+
+  /**
+   * One call is done with an authorization — and its ending is what decides
+   * whether the authorization is let go:
+   *
+   *   * `'refused'` — the whitelist 402: describe.net says nothing was settled.
+   *     Let go at once, whoever else holds it (their sends are refused alike).
+   *   * `'delivered'` — the read reached this caller. Let go only when NOBODY
+   *     is reading it and it owes NO read: one authorization pays one read,
+   *     but a read it bought for a call that failed is still owed to that
+   *     call, and the way to recover it is to re-send it, never to buy it
+   *     again (`HeldAuthorization.owed`).
+   *   * `'owed'` — every other ending: this call's read was paid and not
+   *     handed over. Held, and the next call claims it.
+   *
+   * Only ever deletes the authorization it was given — never a newer one that
+   * replaced it — and never puts back one that is gone.
+   */
+  private end(path: string, authorization: HeldAuthorization, ending: Ending): void {
+    authorization.readers -= 1;
+    if (ending === 'owed') {
+      authorization.owed += 1;
+      return;
+    }
+    if (ending === 'delivered' && (authorization.readers > 0 || authorization.owed > 0)) return;
+    if (this.#held.get(path) === authorization) this.#held.delete(path);
+  }
+
+  private async sendAndRead<T>(
+    path: string,
+    authorization: HeldAuthorization,
+    parse: (body: unknown, payment: PaymentEvidence | null) => T,
+    ending: { is: Ending },
+  ): Promise<{ result: T; servedReceipt: string | null }> {
     const { header, terms, validBefore, nonce, network } = authorization;
+    // Counted here, as it LEAVES — see `HeldAuthorization.sent`.
     authorization.sent += 1;
     const resent = () => authorization.sent > 1;
     const unanswered = {
@@ -1414,7 +1606,6 @@ export class DescribeClient {
     };
 
     let second: Response;
-    authorization.inFlight += 1;
     try {
       second = await this.request(path, { 'X-PAYMENT': header });
     } catch (error) {
@@ -1432,8 +1623,6 @@ export class DescribeClient {
         resend: resendAfterPaying(undefined, null, resent()),
         ...unanswered,
       });
-    } finally {
-      authorization.inFlight -= 1;
     }
 
     const receipt = second.headers.get('X-Payment-Receipt');
@@ -1487,11 +1676,13 @@ export class DescribeClient {
         network,
       };
       // Every other answer leaves it held — it is already there, set before
-      // the send. There is deliberately no "hold again" here: a concurrent
-      // call that was DELIVERED released it, and putting a delivered
-      // authorization back is how a later read re-sends a spent one and reads
-      // a 409 as "it may have moved money" (the refuter's P2-2).
-      if (attempt.resend === 'new-challenge-ok') this.release(path, header);
+      // the send — and owes this call its read (`end`). There is deliberately
+      // no "hold again" anywhere: one that is gone — refused, or forgotten by
+      // the caller — is never put back (the refuter's P2-2).
+      // ⚠️ Until c0der's round 1 (P1-1) this comment also read *"a concurrent
+      // call that was DELIVERED released it"*. That release was the bug: a
+      // delivery to one call let go of the read another call had paid for.
+      if (attempt.resend === 'new-challenge-ok') ending.is = 'refused';
       const failure = attachPayment(
         new DescribeHTTPError(
           second.status,
@@ -1562,15 +1753,11 @@ export class DescribeClient {
       });
     }
 
-    // Delivered. One authorization pays one read: the next call is a new
-    // purchase, so it is no longer held.
-    this.release(path, header);
+    // Delivered. One authorization pays one read: once nobody else is
+    // reading it and it owes nobody a read, the next call is a new purchase
+    // (`end`).
+    ending.is = 'delivered';
     return { result, servedReceipt: receipt };
-  }
-
-  /** Let go of an authorization — only if it is still the one held. */
-  private release(path: string, header: string): void {
-    if (this.#held.get(path)?.header === header) this.#held.delete(path);
   }
 
   /**

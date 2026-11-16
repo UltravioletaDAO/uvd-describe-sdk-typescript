@@ -16,9 +16,19 @@ commits, so they are shorter than they deserve — `git log` has the measurement
 
 ## 0.6.0 — 2026-11-16 (not published yet)
 
-Also carries the DN-PUB-01 change listed under "Unreleased" below, which landed
-on `main` after 0.5.0 without a bump. 0.5.0 was never published either, so the
-first npm release after 0.4.1 is this one.
+The npm release after 0.5.0. 0.5.0 is on npm since 2026-11-16T17:14:31Z,
+published by trusted publishing from `main` 4c45fb3 (`publish.yml` run
+43915333255, `workflow_dispatch`, success) — that build already carried the
+DN-PUB-01 change listed under "Unreleased" below, which changes no shipped
+code (its workflows, its test and `CLAUDE.md` are not in the tarball; only its
+entry in this file is).
+
+⚠️ Corrected the same day (c0der's round 1, P2-3), and the old text is left
+because it shipped in the tarball's draft: this paragraph read *"Also carries
+the DN-PUB-01 change listed under "Unreleased" below, which landed on `main`
+after 0.5.0 without a bump. 0.5.0 was never published either, so the first npm
+release after 0.4.1 is this one."* It was written before that run, and 0.5.0
+went out two hours before this change was proposed.
 
 ### Fixed — after paying, calling again re-sends the authorization instead of signing a second one (F-A2) [money]
 
@@ -100,7 +110,38 @@ first npm release after 0.4.1 is this one.
 - `recovery` keeps its frozen text (shared with the Python twin). After a
   payment, read `payment.resend` first.
 - Nothing is re-sent on its own. Two concurrent calls for the same resource
-  now share one authorization.
+  now share one authorization — from the first instant: a call that arrives
+  while another is still asking, reading the challenge or waiting on its payer
+  waits for that signature instead of buying its own.
+  ⚠️ The first half of that sentence was all this line said until c0der's
+  round 1 (P1-1), and it was true only once the first call was back from
+  `payer.pay()`: two calls in the same tick both signed, the second overwrote
+  the first, and the caller retrying the one that got a `503` as told signed a
+  third — three payments for two reads, measured with a spy payer.
+
+### Fixed in review — c0der's round 1 (2026-11-16) [money]
+
+- **Single-flight per resource**: the free ask, the challenge and the payer run
+  once for concurrent calls; the others wait for that signature and send it
+  (`DescribeClient.#acquiring`). If that call ends without one (a free answer,
+  a payer that declined, a failure before paying), the waiters start over —
+  nothing was spent — and share the next signature.
+- **A delivery no longer lets go of a read another call is owed**. Each held
+  authorization counts the calls reading it and the reads it bought that were
+  never handed over; a delivery releases it only when both are zero, and the
+  next call for that resource claims an owed read by re-sending it —
+  describe.net's *"re-send the same header to the request you signed it for"*
+  (`describe-net/site/auth.md:385-386`), served from its receipt for free
+  (`auth.md:342-345`). Before, two calls sharing one authorization, one `503`
+  and one delivery: the delivery let go, and the `503` one's retry signed a new
+  one.
+- `forgetAuthorization()` answers `'in-flight'` while any call that took the
+  authorization has not finished (was: while a send of it was unanswered).
+- Tests that pin two guards whose mutants survived the first review: the
+  `sent` counter counts a send when it leaves (`R3`: the first send answered
+  `payment_required` while a re-send of the same header is out stays held),
+  and `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` is the literal 15 of describe.net's
+  `dn-pay.js:714`.
 
 ## Unreleased (DN-PUB-01, no version bump)
 
@@ -115,7 +156,7 @@ first npm release after 0.4.1 is this one.
   check comes back or goes away. CI on `push` now runs only when a file it reads
   changes.
 
-## 0.5.0 — 2026-09-30 (not published yet)
+## 0.5.0 — 2026-09-30 (on npm since 2026-11-16T17:14:31Z; this heading read "not published yet" until then)
 
 ### Added — `uvd-describe-sdk/widget`
 
@@ -205,7 +246,7 @@ in 0.5.0.
 - The client, its types and its parsers. `/names/resolve` and `/names/reverse`
   are in `fuera`, not implemented.
 
-## 0.4.1 — 2026-09-15 (not published yet)
+## 0.4.1 — 2026-09-15 (on npm since 2026-09-15T04:59:28Z, `v0.4.1` tag; this heading read "not published yet" until 2026-11-16)
 
 ### Added
 
