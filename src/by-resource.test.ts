@@ -60,7 +60,8 @@ describe('byResource() reads the live answer', () => {
         lastEligibleRatingAt: '2026-04-26T06:40:43Z',
       },
     });
-    // Six rows, one agent: one `payTo` on six chains. A row is a network.
+    // Six rows, one agent: a row is a network, not a counterparty — and
+    // `agent()` over every row would pay six times for one read.
     expect(new Set(found.collectors.map((c) => c.network)).size).toBe(6);
     expect(new Set(found.collectors.map((c) => c.agent?.agentId)).size).toBe(1);
 
