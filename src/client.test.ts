@@ -2239,6 +2239,36 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(pay).toHaveBeenCalledTimes(1);
   });
 
+  it('MOUNTS THE BAD STATE: the whitelist 402 is not a delivery — a 409 to another send of that authorization, still out when it was refused, does not say it SETTLED', async () => {
+    // c0der's round 2, from this worker's own sweep of the guard next to
+    // MX16: `delivered` counted on a 'refused' ending (`ending !== 'owed'`,
+    // mutant MX16b) passed the suite with the two tests above, and put "it
+    // SETTLED … not a payment in doubt" on a 409 for an authorization
+    // describe.net had just said settled nothing.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    expect(sent).toHaveLength(2); // both took H1
+
+    parked[0](reply(402, { ...CHALLENGE_402, error: 'PAYMENT_VERIFICATION_FAILED' }));
+    expect((await caughtPaid(a.then(rethrown))).payment.resend).toBe('new-challenge-ok');
+
+    parked[1](reply(409, { error: 'authorization_spent', retryable: false }));
+    const err = await caughtPaid(b.then(rethrown));
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    expect(err.status).toBe(409);
+    expect(err.payment.resend).toBe('reconcile');
+    expect(err.message).toContain('may already have moved money');
+    expect(err.message).not.toContain('already delivered');
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+
   it('MOUNTS THE BAD STATE: the free ask is never single-flight — five reads the route answers for free run side by side, and four that time out fail together', async () => {
     // P2-A of this round's own refuter, measured on its first draft (which
     // put the single-flight before the free ask): the partner rail, where the
