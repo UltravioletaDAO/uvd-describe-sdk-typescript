@@ -1550,9 +1550,9 @@ export class DescribeClient {
       `GET ${path}: another call has been buying the authorization for this resource for ` +
         `${this.timeoutMs} ms and its payer has not answered. This call sent nothing and paid ` +
         'nothing; calling again waits for that signature again, or sends it once it is held. ' +
-        'Until that payer resolves or throws, every call for this resource on this client ends ' +
-        'like this one, and `forgetAuthorization()` has nothing to drop: no authorization is ' +
-        'held yet.',
+        'Until that payer resolves or throws, every call for this resource on this client that ' +
+        'gets a 402 ends like this one, and `forgetAuthorization()` has nothing to drop: no ' +
+        'authorization is held yet.',
     );
   }
 

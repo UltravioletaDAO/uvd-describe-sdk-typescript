@@ -432,8 +432,8 @@ try {
   calling again is safe (it says `serviceFault: true`, but the slow party was
   your own payer). Your `pay()` must resolve or throw: one that never settles
   leaves that resource unreadable on that client — every later call for it
-  times out the same way, and `forgetAuthorization()` has nothing to drop,
-  because nothing is held yet. If one of them gets a
+  that gets a `402` times out the same way, and `forgetAuthorization()` has
+  nothing to drop, because nothing is held yet. If one of them gets a
   `503` and the other is delivered, the `503` one's retry re-sends the same
   authorization: its read was paid, and describe.net serves it again from its
   receipt (*"re-send the same header to the request you signed it for"*,
