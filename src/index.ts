@@ -40,7 +40,9 @@
  * signing a payment and reading the answer there is a window where the USDC has
  * already moved, and a `null` there hides a spend from the caller. Use
  * `failedAfterPaying(error)` to tell "it broke before I paid" from "it broke
- * after".
+ * after", and `error.payment.resend` for what to do next. Since 0.6.0 calling
+ * the same method again re-sends the authorization the client holds for that
+ * resource instead of signing a second one (F-A2, 2026-11-16).
  *
  * ## Note on the public surface
  *
@@ -91,7 +93,7 @@ export {
   failedAfterPaying,
   failOpenCovers,
 } from './errors';
-export type { DescribeErrorKind, PaymentAttempt, X402Challenge } from './errors';
+export type { DescribeErrorKind, PaymentAttempt, PaymentResend, X402Challenge } from './errors';
 
 /**
  * The recovery table — what to do INSTEAD of the failure you are holding.
@@ -159,6 +161,8 @@ export {
   DEFAULT_JITTER_MS,
   DEFAULT_SITE_URL,
   DEFAULT_TIMEOUT_MS,
+  AUTHORIZATION_EXPIRY_MARGIN_SECONDS,
+  MAX_RETRY_AFTER_SECONDS,
   PARTNER_CHAIN_ID,
   PARTNER_KEY_ENV,
   SDK_NAME,

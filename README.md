@@ -353,9 +353,18 @@ is the reason the rule exists: those two methods used to return `WalletBreakdown
 | null` and swallow every service failure. Measured against a dead port on
 2026-08-30, a timeout on a metered route returned `null`.
 
-A loud failure after paying is recoverable — retry, log, or claim. A silent
+A loud failure after paying is recoverable — re-send, log, or claim. A silent
 `null` is not. So no flag can buy the right to swallow it, `failOpen: true`
 included: availability is your preference, a settled payment is a fact.
+
+⚠️ **Until 0.6.0 this paragraph said "retry, log, or claim", and a retry was
+the bug.** Calling the method again after a 503, a timeout or a dead socket
+asked for a fresh 402 and had your payer sign a **second** authorization — the
+exact move describe.net says can charge you twice (*"Signing a fresh
+authorization here can make you pay twice"*, [auth.md](https://describe.net/auth.md)).
+Since 0.6.0 the client keeps the authorization it sent, per resource, and
+calling the method again **re-sends that same one**. `err.payment.resend` says
+what to do:
 
 ```ts
 import { failedAfterPaying } from 'uvd-describe-sdk';
@@ -369,13 +378,106 @@ try {
     //                             the tx hash — or settlementPending is true
     //                             and the hash has not been reported yet
     //   settlement: 'unknown'  -> the SDK cannot tell. Reconcile, do not assume
-    reconcile(err.payment.receipt, err.payment.amount, err.payment.token);
+    // ...and what to do with the authorization:
+    switch (err.payment.resend) {
+      case 'same-header':      // no verdict yet: call again after
+        await sleep((err.payment.retryAfterSeconds ?? 5) * 1000);
+        return describe.walletBreakdown(wallet); // re-sends the SAME authorization
+      case 'reconcile':        // it may have moved money: do not buy again blind
+        reconcile(err.payment.receipt, err.payment.nextAction, err.payment.amount);
+        // Only after checking: past err.payment.validBefore AND no transfer of
+        // err.payment.nonce on err.payment.network — then buy the read again:
+        //   if (describe.forgetAuthorization(err) === 'forgotten')
+        //     return describe.walletBreakdown(wallet);
+        break;
+      case 'new-challenge-ok': // describe.net says nothing was settled
+        return describe.walletBreakdown(wallet); // signs a new one
+    }
   } else {
     // Nothing was transmitted: a 402 with no payer, a DO_NOT_PAY, a 404, a
     // payer that declined. You spent nothing — retry freely.
   }
 }
 ```
+
+### After paying: re-send, never re-sign
+
+| answer to the paid request | `resend` | calling the method again |
+|---|---|---|
+| any `5xx` (all five `503` codes, a `500` with or without a receipt, a `504`), a `429`, a timeout, a dead socket, a `2xx` whose body could not be read | `same-header` | re-sends the **same** authorization; wait `retryAfterSeconds` first |
+| any `409`, a `402` whose `error` is anything else (`PAYMENT_SETTLEMENT_FAILED`, `FACILITATOR_ERROR`…), any other `4xx`, a `3xx` | `reconcile` | still re-sends the same one, never a new one — but it will not change the answer. Read `nextAction`, look on-chain for the transfer to `payTo`, and only then `forgetAuthorization(err)` |
+| a `402` whose `error` is exactly `PAYMENT_VERIFICATION_FAILED`, or exactly `payment_required` on the authorization's **first** send | `new-challenge-ok` | asks for a new challenge and signs a new one |
+
+* **The third row is a whitelist of two, and that is describe.net's rule**
+  ([paybox.md](https://describe.net/paybox.md), step 7: *"Only two answers to a
+  replay mean that nothing was settled"*). Every other refusal can sit on top of
+  an authorization that was already used. Exact match: a variant of either code
+  lands in `reconcile`. And `payment_required` on a re-send does not count —
+  *"that `503` still rules"*.
+* **The header never leaves the client except to describe.net.** It is not in
+  `err.payment`, not in `err.message`, not in `JSON.stringify(err)` or
+  `util.inspect(err)` (a transport error that quotes it rides as a scrubbed
+  copy in `cause`): until its `validBefore` it is money to whoever holds it. The
+  client keeps it in a `#private` map that `JSON.stringify` and `util.inspect`
+  cannot see, one entry per resource (`GET /reputation/wallet/0x…`), and a new
+  `DescribeClient` holds nothing. The paid request does not follow redirects
+  (`redirect: 'manual'`): the Fetch standard strips `Authorization` on a
+  cross-origin redirect and nothing else, so a `3xx` (status `0` in a browser)
+  is an answer — `reconcile` — never a hop.
+* **Two calls at once for one resource sign once.** Both ask for free, in
+  parallel; a call whose `402` arrives while another is reading the challenge
+  or waiting on its payer (a human approving it, say) waits for that signature
+  and sends it too. Each such wait lasts at most `timeoutMs`, then the call
+  throws a `DescribeTimeout` with no `payment` — it sent and paid nothing, so
+  calling again is safe (it says `serviceFault: true`, but the slow party was
+  your own payer). Your `pay()` must resolve or throw: one that never settles
+  leaves that resource unreadable on that client — every later call for it
+  that gets a `402` times out the same way, and `forgetAuthorization()` has
+  nothing to drop, because nothing is held yet. A new `DescribeClient` does
+  not hold the purchase, but it is not a free way out either: it signs its
+  own, and if the old `pay()` resolves later the original call still sends
+  what it signed — two payments, one of them for a call you may have stopped
+  waiting for. If one of them gets a
+  `503` and the other is delivered, the `503` one's retry re-sends the same
+  authorization: its read was paid, and describe.net serves it again from its
+  receipt (*"re-send the same header to the request you signed it for"*,
+  [auth.md](https://describe.net/auth.md)). "Same resource" means the same
+  string: `walletBreakdown('0xABC…')` and its lower-case spelling are two.
+* **A read that was paid and not handed over is owed** (since 0.6.0): the
+  next call for that resource — a retry or a fresh read, the client cannot
+  tell them apart — re-sends the authorization instead of buying again. Past
+  describe.net's receipt window (300–1800 s) that re-send answers `409`; when
+  this client already delivered a read with it, the error says so and names
+  `forgetAuthorization(err)`.
+* **It is let go** when the read is delivered and no other call that took it
+  is still out or still owed its read (one authorization pays one read: the
+  next call is a new purchase), on the whitelist `402`, and when **you**
+  call `describe.forgetAuthorization(err)`. 🔴 **Never by the clock.** Past
+  `validBefore` the old authorization can no longer execute, so re-sending it
+  costs nothing, and describe.net's answer to it is the only evidence of what
+  the first send did: a replay of the read from its receipt (`200`), a `409`
+  that says it settled or may have, or `PAYMENT_VERIFICATION_FAILED` when it
+  never reached the paywall, which releases it. Letting go at `validBefore` +
+  15 s — the obvious rule, and where this design started before its review —
+  buys a settled read twice on the five chains where `uvd-x402-sdk` signs for
+  60 s: 76 s after a `500` with a receipt, measured.
+* **`forgetAuthorization(err)`** is paybox.md's *"past its `validBefore` … with
+  no transfer on-chain"*. The client checks the half it can and answers why:
+  `'in-flight'` (a call that took it has not finished — wait), `'may-still-execute'`
+  (`validBefore` + 15 s has not passed, or is unknown; `{ force: true }`
+  overrides only this one), `'not-held'` (nothing held for that error any more —
+  pass the error this client threw, or one that wraps it in `cause`), or
+  `'forgotten'`. The other half is yours: look for `err.payment.nonce` on
+  `err.payment.network` (`AuthorizationUsed(authorizer, nonce)` on the token).
+  If you **find** it — paid, and the read lost past describe.net's receipt
+  window — forgetting buys a second read, knowingly.
+* A payer that returns no usable header — empty, not a string, a CR/LF, a
+  character outside visible ASCII — is a `TypeError` before anything is held or
+  sent.
+* `retryAfterSeconds` is the `Retry-After` header, else the body's
+  `retry_after_seconds`, capped at 30 s — describe.net's own ceiling.
+* Nothing is ever re-sent on its own. The client remembers; you decide when to
+  call.
 
 `settlement` is never `'not settled'`, and that omission is deliberate: an
 unhandled 500 is rendered above the paywall middleware and carries no receipt
@@ -425,6 +527,11 @@ What happens under the hood, in order:
    EIP-3009 authorization, never touches a key.
 5. Replay the identical request with `X-PAYMENT`, and surface
    `X-Payment-Receipt` / `X-Payment-Reused` as `result.payment`.
+
+Before step 1, since 0.6.0: if an earlier call for the **same resource** sent an
+authorization and did not see it through (a 503, a timeout…), that authorization
+is re-sent as is — no free ask, no challenge, no payer. See
+[After paying](#after-paying-re-send-never-re-sign).
 
 Step 4 is the line that changes what a failure means. Everything before it costs
 nothing if it fails; everything after it may have cost real USDC, and those
@@ -766,7 +873,13 @@ out in a pack, which is the problem it came to solve.
 
 It is **not** backoff: jitter spreads a herd that has not asked for anything
 yet, backoff yields to a service that already said no. This package has no
-retry; build one on `error.transient` and give *that* the backoff.
+retry; build one on `error.transient` and give *that* the backoff. On the
+metered routes build it on `error.payment.resend` instead and honour
+`retryAfterSeconds` — a retry there re-sends the authorization the client
+holds, never a new one; see
+[After paying: re-send, never re-sign](#after-paying-re-send-never-re-sign).
+⚠️ Until 0.6.0 this sentence stopped at `error.transient`, and on a metered
+route that retry signed a second authorization.
 
 > **Python parity.** `uvd-describe-sdk` for Python takes `jitter=0.4`, in
 > **seconds**, because its `timeout` is in seconds while this one's is
@@ -902,7 +1015,9 @@ const key = (w: string) => (/^0x[a-fA-F0-9]{40}$/.test(w) ? w.toLowerCase() : w)
 **No retry.** MeshRelay retries a transient failure at most *once*: "hammering a
 permanent failure is how EM turned one error into a four-hour storm." Build the
 policy you want on `error.transient`, which is a fact rather than a string
-match.
+match — and, after a payment, on `error.payment.resend`. Calling a metered
+method again re-sends the authorization the client already holds for that
+resource; it does not sign a new one (0.6.0, F-A2).
 
 **No writes.** This SDK reads. It never rates anyone, signs nothing on-chain and
 holds no key.

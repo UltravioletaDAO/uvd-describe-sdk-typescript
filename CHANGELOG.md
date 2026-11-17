@@ -14,7 +14,169 @@ header.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
-## Unreleased (DN-PUB-01, no version bump)
+## 0.6.0 — 2026-11-16 (not published yet)
+
+The npm release after 0.5.0. 0.5.0 is on npm since 2026-11-16: `publish.yml`
+run 43915333255 logged `+ uvd-describe-sdk@0.5.0` at 17:11:52Z, and the
+registry stamps the version 17:14:31Z (`time["0.5.0"]` of
+`https://registry.npmjs.org/uvd-describe-sdk`, read without a token). It was
+published by trusted publishing from `main` 4c45fb3 (that run,
+`workflow_dispatch`, success) — that build already carried the
+DN-PUB-01 change listed under "Unreleased" below, which changes no shipped
+code (its workflows, its test and `CLAUDE.md` are not in the tarball; only its
+entry in this file is).
+
+⚠️ Corrected the same day (c0der's round 1, P2-3), and the old text is left
+because it shipped in the tarball's draft: this paragraph read *"Also carries
+the DN-PUB-01 change listed under "Unreleased" below, which landed on `main`
+after 0.5.0 without a bump. 0.5.0 was never published either, so the first npm
+release after 0.4.1 is this one."* It was written before that run, and 0.5.0
+went out two hours before this change was proposed.
+
+⚠️ And corrected again in c0der's round 2 (P3): the first sentence read
+*"0.5.0 is on npm since 2026-11-16T17:14:31Z"* — the registry's stamp alone,
+which that round's refuter could not reproduce from the run (it did not query
+the registry: `npm view` sends an `.npmrc` token if there is one) and which is
+2 min 39 s after the run's own `+ uvd-describe-sdk@0.5.0` line. Both are quoted
+now, each with where it can be read.
+
+### Fixed — after paying, calling again re-sends the authorization instead of signing a second one (F-A2) [money]
+
+- **The bug, measured with a spy payer:** after a 5xx, a timeout or a dead
+  socket that followed the payment, the error came out `transient: true`, the
+  README said to build the retry on `transient`, and calling the method again
+  started a new 402 and had the payer sign a **second** authorization: two
+  signatures for one read. describe.net says that move can charge twice
+  (`describe-net/site/auth.md:350-372`).
+- **Now the client holds the authorization it sent**, one per resource, in a
+  `#private` map, and calling `walletBreakdown()` / `agent()` again for the same
+  resource re-sends the **same** `X-PAYMENT`, with no new 402, no payer and no
+  signature. It lets go when the read is delivered, on the whitelist 402, and
+  on `forgetAuthorization(error)` — **never by the clock**. Releasing at
+  `validBefore` + 15 s, where this change started before its review, buys a
+  settled read twice on the chains where `uvd-x402-sdk` signs for 60 s:
+  describe.net replays a settled read from its receipt for 300–1800 s, and an
+  expired authorization costs nothing to re-send.
+- **The header is in no serialization**: not in `error.payment`, not in the
+  message, not in `JSON.stringify(err)` or `util.inspect` of the error or the
+  client. A transport or a body that echoes it — verbatim, percent-encoded or
+  with escaped slashes — has it replaced by `[x-payment-redacted]` before any
+  truncation, and on a paid send the transport's error rides in `cause` as a
+  scrubbed copy (name, code, message, stack, nested cause).
+- **The paid request does not follow redirects** (`redirect: 'manual'`): Fetch
+  strips only `Authorization` on a cross-origin redirect, so a 30x would have
+  handed the `X-PAYMENT` to another host. The 3xx is classified as an answer
+  (`reconcile`); `'error'` would have surfaced as `fetch failed`, a dead socket
+  re-sent forever.
+- **A payer that returns no usable header** (empty, not a string, a CR/LF,
+  non-ASCII) is a `TypeError` before anything is held or sent.
+- **The message no longer says** *"the same receipt unlocks only this
+  byte-identical resource"*. A receipt unlocks nothing. It now depends on the
+  status and the body's `error`, and says what the client will do with the
+  authorization.
+- **A paid 200 whose JSON lacks its essential shape now carries
+  `error.payment`** and is held. It used to be parsed after the paid path
+  returned, so it left with no `payment`, `failedAfterPaying()` said nothing
+  was transmitted, and the README's "retry freely" signed again.
+
+### Added
+
+- `PaymentAttempt.resend`: `'same-header' | 'reconcile' | 'new-challenge-ok'`
+  (type `PaymentResend`). `'new-challenge-ok'` is a whitelist of two, matched
+  exactly: a 402 whose `error` is `PAYMENT_VERIFICATION_FAILED`, or
+  `payment_required` on the authorization's first send
+  (`describe-net/site/paybox.md:151-163`). Every other 402, every 409 and every
+  other 4xx is `'reconcile'`. Every 5xx, a 429, a timeout, a dead socket and an
+  unreadable 2xx are `'same-header'`.
+- `PaymentAttempt.serverError`, `retryable`, `retryAfterSeconds` (the
+  `Retry-After` header, delay-seconds or IMF-fixdate, else the body's
+  `retry_after_seconds`, capped at `MAX_RETRY_AFTER_SECONDS` = 30, describe.net's
+  own ceiling), `nextAction` (URL-redacted, capped at 600) and `validBefore`
+  (read from the signed header; public; `null` when unreadable or in ms).
+- `PaymentAttempt.nonce` and `network`: the EIP-3009 nonce and the envelope's
+  network, read from the signed header (public) — what the on-chain check of
+  `reconcile` needs to tell this authorization's transfer from any other.
+- `DescribeClient.forgetAuthorization(error, { force? })` →
+  `'forgotten' | 'not-held' | 'in-flight' | 'may-still-execute'`: drops the
+  authorization that failure was about (following `cause` five levels), so the
+  next call signs a new one — for after the on-chain check
+  (`describe-net/site/paybox.md`, step 7). Refuses while a send of it is
+  unanswered (never overridable) and until `validBefore` +
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` (15 s) has passed or when it is
+  unknown (`force` overrides only this); never drops a newer one.
+- Exported: `PaymentResend`, `MAX_RETRY_AFTER_SECONDS`,
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`.
+
+### ⚠️ Breaking (types only)
+
+- The eight new `PaymentAttempt` fields are REQUIRED (`null` when absent, like
+  `receipt`). Code that builds a `PaymentAttempt` literal — a test double —
+  stops compiling until it adds them. Nothing changes for code that reads one.
+
+### Not changed, on purpose
+
+- `transient` keeps its values. After a payment, a retry built on it is now a
+  re-send, before and after `validBefore`.
+- `recovery` keeps its frozen text (shared with the Python twin). After a
+  payment, read `payment.resend` first.
+- Nothing is re-sent on its own. Two concurrent calls for the same resource
+  now share one authorization — from the first instant: a call whose free ask
+  comes back 402 while another is reading the challenge or waiting on its
+  payer waits for that signature (up to `timeoutMs`) instead of buying its own.
+  ⚠️ The first half of that sentence was all this line said until c0der's
+  round 1 (P1-1), and it was true only once the first call was back from
+  `payer.pay()`: two calls in the same tick both signed, the second overwrote
+  the first, and the caller retrying the one that got a `503` as told signed a
+  third — three payments for two reads, measured with a spy payer.
+
+### Fixed in review — c0der's round 1 (2026-11-16) [money]
+
+- **Single-flight per resource, from the 402 on**: the challenge and the
+  payer run once for concurrent calls; the others wait for that signature and
+  send it (`DescribeClient.#acquiring`). If that call ends without one (a payer
+  that declined, a failure before paying), the waiters look again and the
+  first of them buys with the 402 it already has — nothing was spent. The
+  free ask is NOT single-flight: the round's own first draft made it so, and
+  its refuter measured every answer that buys nothing — the partner rail's
+  free 200, a timeout during an outage — running one call at a time (P2-A).
+- ⚠️ **Semantics change, ratified by c0der:** a read paid and not handed over
+  is OWED, and the next call for that resource — retry or fresh read — re-sends
+  the authorization instead of buying again; past the receipt window that
+  answers `409`, and when this client already delivered a read with that
+  authorization the error says so and names `forgetAuthorization(error)`
+  (chosen over forgetting and re-buying on its own, which would make a second
+  payment a reflex).
+- **Each wait for another call's signature lasts at most `timeoutMs`** (per
+  wait, not per call: k declining payers in a row add up to k × `timeoutMs`),
+  then a `DescribeTimeout` that carries no `payment` (it sent and paid
+  nothing; it says `serviceFault: true` although the slow party is the
+  caller's own payer), and the waiter is taken out of the count before it
+  throws. Without the bound, a payer that never answered left
+  every later call for that resource waiting forever (P2-B of the same
+  refuter). `X402Payer.pay()` is documented to resolve or throw.
+- **A delivery no longer lets go of a read another call is owed**. Each held
+  authorization counts the calls reading it and the reads it bought that were
+  never handed over; a delivery releases it only when both are zero, and the
+  next call for that resource claims an owed read by re-sending it —
+  describe.net's *"re-send the same header to the request you signed it for"*
+  (`describe-net/site/auth.md:385-387`), served from its receipt for free
+  (`auth.md:342-345`). Before, two calls sharing one authorization, one `503`
+  and one delivery: the delivery let go, and the `503` one's retry signed a new
+  one.
+- `forgetAuthorization()` answers `'in-flight'` while any call that took the
+  authorization has not finished (was: while a send of it was unanswered).
+- Tests that pin two guards whose mutants survived the first review: the
+  `sent` counter counts a send when a call commits to it, never when its
+  answer arrives (`R3`: the first send answered `payment_required` while a
+  re-send of the same header is out stays held), and
+  `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` is the literal 15 of describe.net's
+  `dn-pay.js:714`.
+
+## DN-PUB-01 — on `main` since 2026-09-30, no version bump; first shipped in 0.5.0 (2026-11-16)
+
+This heading read *"Unreleased (DN-PUB-01, no version bump)"* until c0der's
+round 1 of 2026-11-16: 0.5.0 was published from a `main` that already carried
+it.
 
 ### Changed
 
@@ -27,7 +189,7 @@ commits, so they are shorter than they deserve — `git log` has the measurement
   check comes back or goes away. CI on `push` now runs only when a file it reads
   changes.
 
-## 0.5.0 — 2026-09-30 (not published yet)
+## 0.5.0 — 2026-09-30 (on npm since 2026-11-16: 17:11:52Z in the publish log, 17:14:31Z in the registry; this heading read "not published yet" until then)
 
 ### Added — `uvd-describe-sdk/widget`
 
@@ -117,7 +279,7 @@ in 0.5.0.
 - The client, its types and its parsers. `/names/resolve` and `/names/reverse`
   are in `fuera`, not implemented.
 
-## 0.4.1 — 2026-09-15 (not published yet)
+## 0.4.1 — 2026-09-15 (on npm since 2026-09-15T04:59:28Z, `v0.4.1` tag; this heading read "not published yet" until 2026-11-16)
 
 ### Added
 

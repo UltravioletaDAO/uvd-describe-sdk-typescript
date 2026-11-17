@@ -1,3 +1,5 @@
+import { inspect } from 'node:util';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -10,17 +12,19 @@ import {
   WALLET_UNRATED,
   WALLET_WITH_SCORE,
 } from './__fixtures__/live';
-import { mockServer, type Route } from './__fixtures__/server';
-import { DescribeClient, type DescribeClientConfig, type DescribeFailure } from './client';
-import { TREASURY_EVM } from './config';
+import { type MockServer, mockServer, type Route } from './__fixtures__/server';
+import { DescribeClient, type DescribeClientConfig, type DescribeFailure, type X402Payer } from './client';
+import { AUTHORIZATION_EXPIRY_MARGIN_SECONDS, MAX_RETRY_AFTER_SECONDS, TREASURY_EVM } from './config';
 import {
   DescribeError,
+  DescribeHTTPError,
   DescribeMalformedHash,
   DescribeNotFound,
   DescribePaymentRefused,
   DescribePaymentRequired,
   failedAfterPaying,
   failOpenCovers,
+  type PaymentResend,
   type X402Challenge,
 } from './errors';
 import type { AgentReputation, WalletBreakdown } from './types';
@@ -735,6 +739,17 @@ describe('post-settlement evidence', () => {
       amount: '0.01',
       token: 'USDC',
       payTo: TREASURY_EVM,
+      // Added 2026-11-16 (F-A2). No answer, so nothing the server said; and
+      // 'SIGNED-ENVELOPE' is not an x402 envelope, so no `validBefore` either.
+      // What is NOT here, and the `toEqual` is what proves it: the header.
+      resend: 'same-header',
+      serverError: null,
+      retryable: null,
+      retryAfterSeconds: null,
+      nextAction: null,
+      validBefore: null,
+      nonce: null,
+      network: null,
     });
   });
 
@@ -816,6 +831,1691 @@ describe('post-settlement evidence', () => {
       expect(err, `${label} did not throw`).toBeInstanceOf(Error);
       expect(failedAfterPaying(err), `${label} was marked as a possible spend`).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tras pagar — F-A2, 2026-11-16. After the authorization leaves, calling the
+// method again re-sends the SAME one; a new one is signed only where
+// describe.net says nothing moved. Until today a retry on `transient` signed a
+// second authorization (measured with a spy payer: two signatures, one read).
+// Run just this block: `npx vitest run src/client.test.ts -t "tras pagar"`.
+// ---------------------------------------------------------------------------
+
+describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)', () => {
+  const PATH = `/reputation/wallet/${KNOWN}`;
+  const OTHER = '0x1111111111111111111111111111111111111111';
+  /** A whole second, so an HTTP-date built from it round-trips exactly. */
+  const T0_MS = 1_800_000_000_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * An `X-PAYMENT` with the SHAPE `uvd-x402-sdk` 2.75.0 builds on EVM
+   * (`encodeEVMPaymentHeader`: `base64(JSON)`, the EIP-3009 authorization at
+   * `payload.authorization`) and nothing real inside it: the signature is
+   * zeros, the `from` is made up, and no key exists anywhere in this file. The
+   * nonce is the call number, so two envelopes are never equal — "the same
+   * header" in an assertion below can only mean "the same signature".
+   */
+  const envelope = (n: number, validBefore: number): string =>
+    btoa(
+      JSON.stringify({
+        x402Version: 2,
+        scheme: 'exact',
+        network: 'eip155:8453',
+        payload: {
+          signature: `0x${'00'.repeat(65)}`,
+          authorization: {
+            from: `0x${'11'.repeat(20)}`,
+            to: TREASURY_EVM,
+            value: '10000',
+            validAfter: '0',
+            validBefore: String(validBefore),
+            nonce: `0x${n.toString(16).padStart(64, '0')}`,
+          },
+        },
+      }),
+    );
+
+  /** The spy payer: a fresh envelope per call. 300 s is what the payment SDK stamps on Base. */
+  const spyPayer = (validBefore = Math.floor(Date.now() / 1000) + 300) => {
+    let n = 0;
+    return vi.fn(async (_challenge: X402Challenge) => envelope(++n, validBefore));
+  };
+
+  const paidClient = (server: MockServer, pay: X402Payer['pay']) =>
+    testClient({ fetchImpl: server.fetch, timeoutMs: 50, payer: { pay } });
+
+  const DELIVERED: Route = {
+    body: WALLET_BREAKDOWN,
+    headers: { 'X-Payment-Receipt': SETTLEMENT_TX, 'X-Payment-Reused': 'true' },
+  };
+
+  // The bodies `describenet/paywall.py` (describe-net f68cc96) serves after a
+  // payment, trimmed to the fields this SDK reads: `_unavailable`,
+  // `_sin_confirmar` and `_conflict` for the 503s, `_conflict` and
+  // `_autorizacion_usada` for the 409s, `_rejected` for the 402s. The texts
+  // are theirs, in their language.
+  const busy = (error: string, extra: Record<string, unknown> = {}): Route => ({
+    status: 503,
+    headers: { 'Retry-After': '5' },
+    body: {
+      error,
+      retryable: true,
+      retry_after_seconds: 5,
+      next_action:
+        'Reintentá esta misma request con el MISMO header de pago (X-PAYMENT o PAYMENT-SIGNATURE) ' +
+        'después de 5 s. NO firmes una autorización nueva.',
+      ...extra,
+    },
+  });
+  const conflict = (error: string): Route => ({
+    status: 409,
+    body: {
+      error,
+      retryable: false,
+      next_action:
+        'NO firmes otra autorización para recuperar esta lectura: la que mandaste ya se usó.',
+    },
+  });
+  const rejected = (error: string, reason: string, nextAction: string): Route => ({
+    status: 402,
+    body: { ...CHALLENGE_402, error, reason, retryable: false, next_action: nextAction },
+  });
+  const NADA_SE_GASTO =
+    'El pago no verificó y NADA se gastó. Firmá una autorización nueva siguiendo `accepts` y ' +
+    'reenviá la request.';
+
+  /** Every answer after paying that must NOT license a second signature. */
+  const AFTER_PAYING: Array<{ label: string; route: Route; resend: PaymentResend; transient: boolean }> = [
+    { label: '503 facilitator_unavailable', route: busy('facilitator_unavailable'), resend: 'same-header', transient: true },
+    {
+      label: '503 settlement_unconfirmed',
+      route: busy('settlement_unconfirmed', { transaction: SETTLEMENT_TX }),
+      resend: 'same-header',
+      transient: true,
+    },
+    { label: '503 authorization_in_flight', route: busy('authorization_in_flight'), resend: 'same-header', transient: true },
+    { label: '503 settlement_in_progress', route: busy('settlement_in_progress'), resend: 'same-header', transient: true },
+    { label: '503 payment_store_unavailable', route: busy('payment_store_unavailable'), resend: 'same-header', transient: true },
+    { label: '409 authorization_spent', route: conflict('authorization_spent'), resend: 'reconcile', transient: false },
+    {
+      label: '409 authorization_already_settled',
+      route: conflict('authorization_already_settled'),
+      resend: 'reconcile',
+      transient: false,
+    },
+    {
+      // describe-net docs/BACKLOG.md:106 — a /verify that passed and a /settle
+      // that refused, answered with the 402 that says "nothing was spent".
+      label: '402 FACILITATOR_ERROR',
+      route: rejected('FACILITATOR_ERROR', 'contract_call_failed', NADA_SE_GASTO),
+      resend: 'reconcile',
+      transient: false,
+    },
+    {
+      label: '402 PAYMENT_SETTLEMENT_FAILED',
+      route: rejected(
+        'PAYMENT_SETTLEMENT_FAILED',
+        'settlement_failed',
+        'La liquidación falló DESPUÉS de aceptar la autorización: puede haberse consumido on-chain.',
+      ),
+      resend: 'reconcile',
+      transient: false,
+    },
+    {
+      label: '500 with X-Payment-Receipt',
+      route: { status: 500, body: {}, headers: { 'X-Payment-Receipt': SETTLEMENT_TX } },
+      resend: 'same-header',
+      transient: true,
+    },
+    { label: '500 with no body at all', route: { status: 500, notJson: 'Internal Server Error' }, resend: 'same-header', transient: true },
+    { label: '504 from the gateway', route: { status: 504, body: { message: 'Endpoint request timed out' } }, resend: 'same-header', transient: true },
+    { label: 'timeout', route: { hang: true }, resend: 'same-header', transient: true },
+    { label: 'dead socket', route: { throws: new TypeError('fetch failed') }, resend: 'same-header', transient: true },
+    {
+      label: '429 at the edge',
+      route: { status: 429, headers: { 'Retry-After': '2' }, body: { message: 'Too Many Requests' } },
+      resend: 'same-header',
+      transient: true,
+    },
+  ];
+
+  /** The whitelist — describe.net's two answers that mean nothing was settled. */
+  const SIGN_AGAIN: Array<{ label: string; route: Route }> = [
+    {
+      label: '402 PAYMENT_VERIFICATION_FAILED',
+      route: rejected('PAYMENT_VERIFICATION_FAILED', 'invalid_signature', NADA_SE_GASTO),
+    },
+    // A proxy that strips the header: describe.net saw no payment at all.
+    { label: '402 payment_required on the first send', route: { status: 402, body: CHALLENGE_402 } },
+  ];
+
+  const caughtPaid = async (run: Promise<unknown>) => {
+    const err = await run.then(
+      () => {
+        throw new Error('expected the call to throw');
+      },
+      (e: unknown) => e,
+    );
+    expect(failedAfterPaying(err)).toBe(true);
+    return err as DescribeError & { payment: NonNullable<DescribeError['payment']> };
+  };
+
+  it('503 tras pagar: Retry-After 5 arrives as 5, the retry re-sends the SAME header, and the payer signs ONCE', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${PATH}#3`]: DELIVERED,
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    const pay = spyPayer(validBefore);
+    const client = paidClient(server, pay);
+
+    // The caller the README taught until today: retry while `transient`.
+    const errors: DescribeError[] = [];
+    let result: WalletBreakdown | undefined;
+    for (let attempt = 0; attempt < 4 && result === undefined; attempt++) {
+      try {
+        result = await client.walletBreakdown(KNOWN);
+      } catch (e) {
+        if (!(e instanceof DescribeError)) throw e;
+        errors.push(e);
+        if (!e.transient) break;
+      }
+    }
+
+    expect(errors).toHaveLength(1);
+    const [err] = errors;
+    expect(failedAfterPaying(err)).toBe(true);
+    expect(err.transient).toBe(true);
+    expect(err.payment).toMatchObject({
+      resend: 'same-header',
+      retryAfterSeconds: 5,
+      serverError: 'facilitator_unavailable',
+      retryable: true,
+      validBefore,
+      status: 503,
+      // What ties a transfer on-chain to THIS authorization: public, read off the envelope.
+      nonce: `0x${(1).toString(16).padStart(64, '0')}`,
+      network: 'eip155:8453',
+    });
+    expect(err.payment!.nextAction).toContain('MISMO header');
+    expect(err.message).toContain('re-sends the SAME');
+    expect(err.message).toContain('after 5 s (Retry-After)');
+    expect(err.message).not.toContain('unlocks');
+
+    expect(result?.finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    // Every route of the mock was served — none of them is a double left unused.
+    expect(server.calls).toHaveLength(3);
+    expect(server.calls[2].path).toBe(PATH);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(await pay.mock.results[0].value);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+  });
+
+  it('every answer after paying outside the whitelist: calling again re-sends the SAME header, the payer signs ONCE', async () => {
+    for (const c of AFTER_PAYING) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: c.route,
+        [`${PATH}#3`]: DELIVERED,
+      });
+      const pay = spyPayer();
+      const client = paidClient(server, pay);
+
+      const err = await caughtPaid(client.walletBreakdown(KNOWN));
+      expect(err.payment.resend, c.label).toBe(c.resend);
+      expect(err.transient, c.label).toBe(c.transient);
+      // The Python twin's assertion, mirrored: outside the whitelist nothing
+      // tells the caller to go and get a new challenge.
+      expect(err.message, c.label).not.toMatch(/new challenge/i);
+      expect(err.message, c.label).not.toContain('unlocks');
+      expect(err.message, c.label).toContain('AFTER paying');
+
+      // The bluntest retry there is: ignore every flag and call again.
+      const again = await client.walletBreakdown(KNOWN);
+      expect(again.finalScore, c.label).toBe(83.0);
+      expect(pay, c.label).toHaveBeenCalledTimes(1);
+      expect(server.calls, c.label).toHaveLength(3);
+      expect(server.calls[2].headers['X-PAYMENT'], c.label).toBe(server.calls[1].headers['X-PAYMENT']);
+    }
+  });
+
+  it('the whitelist, and only it, lets the authorization go: the next call asks for a new challenge and signs a new one', async () => {
+    for (const c of SIGN_AGAIN) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: c.route,
+        [`${PATH}#3`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#4`]: DELIVERED,
+      });
+      const pay = spyPayer();
+      const client = paidClient(server, pay);
+
+      const err = await caughtPaid(client.walletBreakdown(KNOWN));
+      expect(err.payment.resend, c.label).toBe('new-challenge-ok');
+      expect(err.transient, c.label).toBe(false);
+      expect(err.message, c.label).toMatch(/new challenge/);
+
+      const again = await client.walletBreakdown(KNOWN);
+      expect(again.finalScore, c.label).toBe(83.0);
+      expect(pay, c.label).toHaveBeenCalledTimes(2);
+      expect(server.calls, c.label).toHaveLength(4);
+      expect(server.calls[2].headers['X-PAYMENT'], c.label).toBeUndefined();
+      expect(server.calls[3].headers['X-PAYMENT'], c.label).not.toBe(server.calls[1].headers['X-PAYMENT']);
+    }
+  });
+
+  it('the closing criterion: a caller that follows the SDK reaches the payer ONCE after paying, except on the whitelist 402', async () => {
+    // Two policies, both written the way the README now tells them. The server
+    // keeps answering the same thing, so a policy that loops loops for real.
+    const policies: Record<string, (e: DescribeError) => boolean> = {
+      'retry while transient': (e) => e.transient,
+      'follow payment.resend': (e) => e.payment !== undefined && e.payment.resend !== 'reconcile',
+    };
+    for (const [name, keepGoing] of Object.entries(policies)) {
+      for (const c of [...AFTER_PAYING.map((a) => ({ ...a, whitelist: false })), ...SIGN_AGAIN.map((s) => ({ ...s, whitelist: true }))]) {
+        const server = mockServer({ [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 }, [PATH]: c.route });
+        const pay = spyPayer();
+        const client = paidClient(server, pay);
+
+        let calls = 0;
+        for (; calls < 3; calls++) {
+          const err = await client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+          if (!(err instanceof DescribeError) || !keepGoing(err)) break;
+        }
+
+        const label = `${name} / ${c.label}`;
+        if (c.whitelist && name === 'follow payment.resend') {
+          // The one door that may sign again — and it did, so this double is used.
+          expect(pay.mock.calls.length, label).toBeGreaterThan(1);
+        } else {
+          expect(pay, label).toHaveBeenCalledTimes(1);
+        }
+      }
+    }
+  });
+
+  it('🔴 the header is in NO serialization of the error — JSON, String, message, stack, inspect — on any answer', async () => {
+    for (const c of [...AFTER_PAYING, ...SIGN_AGAIN]) {
+      const server = mockServer({ [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 }, [`${PATH}#2`]: c.route });
+      const pay = spyPayer();
+      const err = await caughtPaid(paidClient(server, pay).walletBreakdown(KNOWN));
+      const header = await pay.mock.results[0].value;
+
+      expect(header.length, c.label).toBeGreaterThan(300); // a real-sized envelope, not a word
+      expect(server.calls[1].headers['X-PAYMENT'], c.label).toBe(header); // it DID leave
+      for (const shown of [
+        JSON.stringify(err),
+        String(err),
+        err.message,
+        String(err.stack),
+        inspect(err, { depth: 10, showHidden: true }),
+      ]) {
+        expect(shown, c.label).not.toContain(header);
+      }
+      // Positive control: `payment` IS serialised, which is why the header may not live in it.
+      expect(JSON.stringify(err), c.label).toContain('"resend"');
+    }
+  });
+
+  it('🔴 nor in the client: JSON.stringify and util.inspect of it see no held header, and yet it is held', async () => {
+    const header = envelope(7, Math.floor(Date.now() / 1000) + 300);
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${PATH}#3`]: DELIVERED,
+    });
+    // A plain function, not a spy: `vi.fn` keeps every result it returned, and
+    // inspecting it would find the header in the test double, not in the client.
+    const client = testClient({ fetchImpl: server.fetch, payer: { pay: async () => header } });
+
+    await caughtPaid(client.walletBreakdown(KNOWN));
+
+    expect(JSON.stringify(client)).not.toContain(header);
+    expect(inspect(client, { depth: 20, showHidden: true })).not.toContain(header);
+    // ...and it is there, because calling again sends it.
+    await client.walletBreakdown(KNOWN);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(header);
+  });
+
+  it('🔴 a transport that quotes its own request in the exception does not put the header in message, String, stack, inspect or the cause chain', async () => {
+    let sent = '';
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (!headers['X-PAYMENT']) {
+        return new Response(JSON.stringify(CHALLENGE_402), {
+          status: 402,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      sent = headers['X-PAYMENT'];
+      // The shape an HTTP client really throws: the request in the message,
+      // a nested cause quoting it again, and the config on the object itself.
+      const inner = Object.assign(new Error(`socket hang up while sending ${sent}`), { code: 'ECONNRESET' });
+      throw Object.assign(
+        new TypeError(`fetch failed: GET ${String(input)} ${JSON.stringify(headers)}`, { cause: inner }),
+        { config: { headers } },
+      );
+    }) as typeof fetch;
+    const client = testClient({ fetchImpl, payer: { pay: spyPayer() } });
+
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+
+    expect(err.kind).toBe('unreachable');
+    expect(sent.length).toBeGreaterThan(300);
+    for (const shown of [
+      err.message,
+      String(err),
+      String(err.stack),
+      JSON.stringify(err),
+      inspect(err, { depth: 10, showHidden: true }),
+    ]) {
+      expect(shown).not.toContain(sent);
+    }
+    // Positive controls: the echo WAS there and was cut, and the cause chain
+    // still says what happened — name, code and the nested reason.
+    expect(err.message).toContain('[x-payment-redacted]');
+    const cause = err.cause as Error & { code?: string; cause?: Error & { code?: string } };
+    expect(cause.name).toBe('TypeError');
+    expect(cause.message).toContain('[x-payment-redacted]');
+    expect(cause.cause?.code).toBe('ECONNRESET');
+    expect(cause.cause?.message).toContain('socket hang up');
+  });
+
+  it('a transport error whose `message` is not a string still comes out as a paid failure, not as a raw TypeError', async () => {
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (!headers['X-PAYMENT']) {
+        return new Response(JSON.stringify(CHALLENGE_402), { status: 402, headers: { 'content-type': 'application/json' } });
+      }
+      const weird = new TypeError('placeholder');
+      (weird as unknown as { message: unknown }).message = 42; // writable, and nobody promised a string
+      throw weird;
+    }) as typeof fetch;
+    const err = await caughtPaid(testClient({ fetchImpl, payer: { pay: spyPayer() } }).walletBreakdown(KNOWN));
+    expect(err.kind).toBe('unreachable');
+    expect((err.cause as Error).message).toBe('42');
+  });
+
+  it('🔴 a timeout on the paid send carries a scrubbed cause too', async () => {
+    let sent = '';
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (!headers['X-PAYMENT']) {
+        return new Response(JSON.stringify(CHALLENGE_402), { status: 402, headers: { 'content-type': 'application/json' } });
+      }
+      sent = headers['X-PAYMENT'];
+      const abort = new Error(`aborted while sending ${sent}`);
+      abort.name = 'AbortError';
+      throw abort;
+    }) as typeof fetch;
+    const err = await caughtPaid(testClient({ fetchImpl, payer: { pay: spyPayer() } }).walletBreakdown(KNOWN));
+    expect(err.kind).toBe('timeout');
+    expect(inspect(err, { depth: 10, showHidden: true })).not.toContain(sent);
+    expect((err.cause as Error).name).toBe('AbortError');
+  });
+
+  it('🔴 a body that echoes the header has it cut out of serverReason, serverError and nextAction — before the truncation', async () => {
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const header = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      const json = { 'content-type': 'application/json' };
+      if (!header) return new Response(JSON.stringify(CHALLENGE_402), { status: 402, headers: json });
+      return new Response(
+        JSON.stringify({
+          // At the very start, so a cut at 120 / 300 / 600 chars taken BEFORE
+          // the scrub would leave a prefix of it standing.
+          error: header,
+          message: `${encodeURIComponent(header)} was not accepted`,
+          next_action: `${header} — re-send it`,
+        }),
+        { status: 503, headers: json },
+      );
+    }) as typeof fetch;
+    const pay = spyPayer();
+    const err = await caughtPaid(testClient({ fetchImpl, payer: { pay } }).walletBreakdown(KNOWN));
+    const header = await pay.mock.results[0].value;
+    const prefix = header.slice(0, 40);
+
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    const serverReason = (err as DescribeHTTPError).serverReason;
+    expect(serverReason).toContain('[x-payment-redacted]');
+    for (const shown of [JSON.stringify(err), err.message, String(serverReason)]) {
+      expect(shown).not.toContain(prefix);
+    }
+    expect(err.payment.serverError).toBe('[x-payment-redacted]');
+    expect(err.payment.nextAction).toContain('[x-payment-redacted]');
+    expect(serverReason).not.toContain(encodeURIComponent(header).slice(0, 40));
+    // And the classification read the RAW value, which is not a whitelist code.
+    expect(err.payment.resend).toBe('same-header');
+  });
+
+  it('🔴 the scrub also catches the header percent-encoded and with escaped slashes — base64 carries `/`, `+` and `=`', async () => {
+    // The spy's envelopes happen to encode to base64 with none of the three,
+    // so this one is built to carry all of them.
+    const header = `eyJ4NDAy${'Vm/lc+NpbW='.repeat(12)}`;
+    const escaped = header.split('/').join('\\/');
+    expect(encodeURIComponent(header)).not.toBe(header);
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const sent = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      const json = { 'content-type': 'application/json' };
+      if (!sent) return new Response(JSON.stringify(CHALLENGE_402), { status: 402, headers: json });
+      return new Response(
+        JSON.stringify({
+          error: 'facilitator_unavailable',
+          message: `rejected ${encodeURIComponent(sent)}`,
+          next_action: `re-send ${escaped}`,
+        }),
+        { status: 503, headers: json },
+      );
+    }) as typeof fetch;
+    const err = await caughtPaid(
+      testClient({ fetchImpl, payer: { pay: async () => header } }).walletBreakdown(KNOWN),
+    );
+    const serverReason = String((err as DescribeHTTPError).serverReason);
+    for (const shown of [serverReason, err.message, String(err.payment.nextAction), JSON.stringify(err)]) {
+      expect(shown).not.toContain(encodeURIComponent(header).slice(0, 30));
+      expect(shown).not.toContain(escaped.slice(0, 30));
+    }
+    expect(serverReason).toContain('[x-payment-redacted]');
+    expect(err.payment.nextAction).toBe('re-send [x-payment-redacted]');
+  });
+
+  it('MOUNTS THE BAD STATE: no release by the clock — 76 s after a 500 WITH a receipt, on a 60 s authorization, the read is re-sent, not bought again', async () => {
+    // The refuter's P1-2 of 2026-11-16, reproduced: `uvd-x402-sdk` stamps
+    // `validBefore = now + 60` on five of its six chains, describe.net replays
+    // a settled read from its receipt for 300-1800 s, and the first version of
+    // this client let go at `validBefore + 15` and signed again.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const validBefore = T0_MS / 1000 + 60;
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { status: 500, body: {}, headers: { 'X-Payment-Receipt': SETTLEMENT_TX } },
+      [`${PATH}#3`]: DELIVERED, // describe.net's replay from the receipt
+    });
+    const pay = spyPayer(validBefore);
+    const client = paidClient(server, pay);
+
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(err.payment).toMatchObject({ settlement: 'settled', validBefore, resend: 'same-header' });
+
+    vi.setSystemTime(T0_MS + 76_000);
+    const result = await client.walletBreakdown(KNOWN);
+
+    expect(result.finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.calls).toHaveLength(3);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+  });
+
+  it('past validBefore the expired authorization is re-sent, and only describe.net releases it — PAYMENT_VERIFICATION_FAILED, then a new signature', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const validBefore = T0_MS / 1000 + 300;
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { hang: true }, // a connect timeout: it may never have reached the paywall
+      // An hour later the re-send reaches a paywall that never saw it: the
+      // facilitator refuses an expired authorization BEFORE moving anything.
+      [`${PATH}#3`]: rejected('PAYMENT_VERIFICATION_FAILED', 'expired', NADA_SE_GASTO),
+      [`${PATH}#4`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#5`]: DELIVERED,
+    });
+    const pay = spyPayer(validBefore);
+    const client = paidClient(server, pay);
+
+    await caughtPaid(client.walletBreakdown(KNOWN));
+    vi.setSystemTime(T0_MS + 3_600_000);
+    const released = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(released.payment.resend).toBe('new-challenge-ok');
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+    expect(pay).toHaveBeenCalledTimes(1);
+
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.calls).toHaveLength(5);
+    expect(server.calls[3].headers['X-PAYMENT']).toBeUndefined();
+  });
+
+  it('forgetAuthorization(error) is the caller\'s way out of a 409 — and it drops only what that error was about', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: conflict('authorization_spent'),
+      [`${PATH}#3`]: conflict('authorization_spent'), // a day later: re-sent, still a 409
+      [`${PATH}#4`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#5`]: DELIVERED,
+    });
+    const pay = spyPayer(T0_MS / 1000 + 300);
+    const client = paidClient(server, pay);
+
+    const first = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(first.payment.resend).toBe('reconcile');
+    expect(first.payment.retryable).toBe(false);
+    expect(first.message).toContain('forgetAuthorization');
+    // The threshold it names is the one `forgetAuthorization` applies, margin
+    // included (c0der's round 2, P3 — it read "past `validBefore`").
+    expect(first.message).toContain('past `error.payment.validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`');
+    // And the two clauses that stop a caller from buying again an
+    // authorization that settled — unpinned until this round's own refuter
+    // deleted each and the suite stayed green (vuelta 2, L4 and L5).
+    expect(first.message).toContain('look on-chain for the transfer to `payTo`');
+    expect(first.message).toContain('AND no transfer of it is on-chain');
+    // Never delivered: this 409 IS a payment in doubt, and must not say otherwise.
+    expect(first.message).not.toContain('already delivered');
+    // 300 s from expiring, it can still execute: refused, whatever the caller thinks.
+    expect(client.forgetAuthorization(first)).toBe('may-still-execute');
+    vi.setSystemTime(T0_MS + (300 + AUTHORIZATION_EXPIRY_MARGIN_SECONDS - 1) * 1000);
+    expect(client.forgetAuthorization(first)).toBe('may-still-execute'); // inside the clock margin
+
+    vi.setSystemTime(T0_MS + 86_400_000);
+    const again = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(pay).toHaveBeenCalledTimes(1); // the clock released nothing
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+    // `first` ENDED — owed, not delivered — and this second 409 is still a
+    // payment in doubt: it must not say otherwise (c0der's round 2, P2-2a: a
+    // `delivered` that also counted an owed ending, mutant MX16, passed the
+    // suite and put "it SETTLED … not a payment in doubt" on this message).
+    expect(again.message).not.toContain('already delivered');
+
+    // Somebody else's error, a non-error and a plain object drop nothing.
+    expect(testClient().forgetAuthorization(again)).toBe('not-held');
+    expect(client.forgetAuthorization(new Error('not ours'))).toBe('not-held');
+    expect(client.forgetAuthorization(undefined)).toBe('not-held');
+    expect(client.forgetAuthorization(structuredClone(again))).toBe('not-held');
+    // The caller checked on-chain: past validBefore, no transfer. Now it
+    // decides — through its own error layer, which wrapped ours.
+    expect(client.forgetAuthorization(new Error('app layer', { cause: again }))).toBe('forgotten');
+    expect(client.forgetAuthorization(first)).toBe('not-held'); // already gone
+
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.calls).toHaveLength(5);
+    expect(server.calls[3].headers['X-PAYMENT']).toBeUndefined();
+    expect(server.calls[4].headers['X-PAYMENT']).not.toBe(server.calls[1].headers['X-PAYMENT']);
+  });
+
+  it('MOUNTS THE BAD STATE: a payer that returns no header is stopped BEFORE anything is held or sent', async () => {
+    // Empty, blank, not a string, a CR/LF fetch would refuse to put on the
+    // wire, and a character outside visible ASCII (an x402 envelope is base64).
+    for (const bad of ['', '   ', undefined, 42, 'eyJhIjoxfQ==\r\nX-Injected: 1', 'eyJhIjoxfQ==é']) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: { status: 402, body: CHALLENGE_402 },
+        [PATH]: DELIVERED,
+      });
+      let calls = 0;
+      const client = paidClient(server, async () => {
+        calls += 1;
+        return (calls === 1 ? bad : envelope(1, Math.floor(Date.now() / 1000) + 300)) as string;
+      });
+
+      const err = await client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+      expect(err, JSON.stringify(bad)).toBeInstanceOf(TypeError);
+      expect(failedAfterPaying(err), JSON.stringify(bad)).toBe(false); // nothing transmitted
+      expect(server.calls, JSON.stringify(bad)).toHaveLength(1); // the paid request never went out
+
+      // And nothing is held: the next call starts over with a challenge.
+      await client.walletBreakdown(KNOWN);
+      expect(server.calls[1].headers['X-PAYMENT'], JSON.stringify(bad)).toBeUndefined();
+      expect(calls, JSON.stringify(bad)).toBe(2);
+    }
+  });
+
+  it('a validBefore stamped in milliseconds is unreadable, not a date in the year 58000', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+    });
+    const err = await caughtPaid(paidClient(server, spyPayer(Date.now() + 300_000)).walletBreakdown(KNOWN));
+    expect(err.payment.validBefore).toBeNull();
+  });
+
+  it('🔴 the paid send never follows a redirect — the X-PAYMENT is not handed to whatever host a Location names', async () => {
+    const redirects: Array<[string | undefined, RequestRedirect | undefined]> = [];
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const header = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      redirects.push([header, init?.redirect]);
+      const json = { 'content-type': 'application/json' };
+      if (!header) return new Response(JSON.stringify(CHALLENGE_402), { status: 402, headers: json });
+      return new Response(JSON.stringify(WALLET_BREAKDOWN), { status: 200, headers: json });
+    }) as typeof fetch;
+
+    await testClient({ fetchImpl, payer: { pay: spyPayer() } }).walletBreakdown(KNOWN);
+
+    expect(redirects).toHaveLength(2);
+    expect(redirects[0][1]).toBe('follow'); // the free ask carries nothing worth stealing
+    expect(redirects[1][0]).toBeTruthy();
+    // 'manual', not 'error': with 'error' undici rejects with `fetch failed`,
+    // which reads as a dead socket and is re-sent forever (refuter, round 2).
+    expect(redirects[1][1]).toBe('manual');
+  });
+
+  it('a redirect that answers the paid send is an ANSWER — reconcile, held, re-sent to the same URL, never followed', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { status: 301, body: {}, headers: { Location: 'https://elsewhere.invalid/steal' } },
+      [`${PATH}#3`]: DELIVERED,
+    });
+    const pay = spyPayer();
+    const client = paidClient(server, pay);
+
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(err.status).toBe(301);
+    expect(err.payment.resend).toBe('reconcile');
+    expect(err.transient).toBe(false);
+
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.calls.map((c) => c.path)).toEqual([PATH, PATH, PATH]);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+  });
+
+  it('forgetAuthorization with an unreadable validBefore is refused unless forced', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: conflict('authorization_spent'),
+      [`${PATH}#3`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#4`]: DELIVERED,
+    });
+    let n = 0;
+    const client = paidClient(server, async () => `OPAQUE-PAYER-ENVELOPE-000${++n}`);
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(err.payment.validBefore).toBeNull();
+    expect(client.forgetAuthorization(err)).toBe('may-still-execute');
+    expect(client.forgetAuthorization(err, { force: true })).toBe('forgotten');
+    await client.walletBreakdown(KNOWN);
+    expect(n).toBe(2);
+    expect(server.calls[3].headers['X-PAYMENT']).toBe('OPAQUE-PAYER-ENVELOPE-0002');
+  });
+
+  it('a header this client cannot date is held until the SERVER lets it go — a day later it is still re-sent', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${PATH}#3`]: DELIVERED,
+    });
+    // Not base64 JSON: a payer of some other scheme, or of some other shape.
+    const pay = vi.fn(async (_challenge: X402Challenge) => 'OPAQUE-PAYER-ENVELOPE-0001');
+    const client = paidClient(server, pay);
+
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(err.payment.validBefore).toBeNull();
+
+    vi.setSystemTime(T0_MS + 86_400_000);
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.calls).toHaveLength(3);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe('OPAQUE-PAYER-ENVELOPE-0001');
+  });
+
+  it('retryAfterSeconds: the header, then the body, capped at 30 — and `5.5` is not a day in 2001', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const in10s = new Date(T0_MS + 10_000).toUTCString(); // IMF-fixdate
+    const table: Array<[string, Record<string, string>, Record<string, unknown>, number | null]> = [
+      ['delay-seconds', { 'Retry-After': '5' }, {}, 5],
+      ['zero is a wait too', { 'Retry-After': '0' }, {}, 0],
+      ['above the ceiling', { 'Retry-After': '120' }, {}, MAX_RETRY_AFTER_SECONDS],
+      ['the header wins over the body', { 'Retry-After': '3' }, { retry_after_seconds: 9 }, 3],
+      ['no header: the body field', {}, { retry_after_seconds: 7 }, 7],
+      ['the body is capped too', {}, { retry_after_seconds: 3600 }, MAX_RETRY_AFTER_SECONDS],
+      ['an IMF-fixdate ten seconds ahead', { 'Retry-After': in10s }, {}, 10],
+      ['MOUNTS THE BAD STATE: 5.5 is neither, so the body speaks', { 'Retry-After': '5.5' }, { retry_after_seconds: 4 }, 4],
+      ['MOUNTS THE BAD STATE: 5.5 with no body field is no wait, not 0', { 'Retry-After': '5.5' }, {}, null],
+      ['a negative number is not delay-seconds', { 'Retry-After': '-1' }, {}, null],
+      ['nothing at all', {}, {}, null],
+    ];
+    for (const [label, headers, body, expected] of table) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: { status: 503, headers, body: { error: 'facilitator_unavailable', ...body } },
+      });
+      const err = await caughtPaid(paidClient(server, spyPayer()).walletBreakdown(KNOWN));
+      expect(err.payment.retryAfterSeconds, label).toBe(expected);
+    }
+  });
+
+  it('MOUNTS THE BAD STATE: the whitelist is exact — a variant of the code, or payment_required on a RE-send, licenses nothing', async () => {
+    for (const variant of [
+      'payment_verification_failed',
+      ' PAYMENT_VERIFICATION_FAILED',
+      'PAYMENT_VERIFICATION_FAILED ',
+      'Payment_Required',
+    ]) {
+      const server = mockServer({
+        [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+        [`${PATH}#2`]: rejected(variant, 'invalid_signature', NADA_SE_GASTO),
+        [`${PATH}#3`]: DELIVERED,
+      });
+      const pay = spyPayer();
+      const client = paidClient(server, pay);
+
+      const err = await caughtPaid(client.walletBreakdown(KNOWN));
+      expect(err.payment.resend, JSON.stringify(variant)).toBe('reconcile');
+      await client.walletBreakdown(KNOWN);
+      expect(pay, JSON.stringify(variant)).toHaveBeenCalledTimes(1);
+      expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+    }
+
+    // paybox.md: "`payment_required` speaks only for the request that got it:
+    // if you presented that authorization earlier and got a `503`, that `503`
+    // still rules."
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${PATH}#3`]: { status: 402, body: CHALLENGE_402 }, // the re-send arrived with no header
+      [`${PATH}#4`]: DELIVERED,
+    });
+    const pay = spyPayer();
+    const client = paidClient(server, pay);
+    await caughtPaid(client.walletBreakdown(KNOWN));
+    const resent = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(resent.payment.resend).toBe('same-header');
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.calls).toHaveLength(4);
+    expect(server.calls[3].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+  });
+
+  it('one authorization per resource: another wallet is its own purchase, and agent() holds its own', async () => {
+    const OTHER_PATH = `/reputation/wallet/${OTHER}`;
+    const AGENT_PATH = '/reputation/agent/base/42';
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${OTHER_PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${OTHER_PATH}#2`]: { body: { ...WALLET_BREAKDOWN, wallet: OTHER } },
+      [`${PATH}#3`]: DELIVERED,
+      [`${AGENT_PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${AGENT_PATH}#2`]: busy('settlement_in_progress'),
+      [`${AGENT_PATH}#3`]: { body: { network: 'base', agent_id: 42 } },
+    });
+    const pay = spyPayer();
+    const client = paidClient(server, pay);
+    const sentTo = (path: string) =>
+      server.calls.filter((call) => call.path === path).map((call) => call.headers['X-PAYMENT']);
+
+    await caughtPaid(client.walletBreakdown(KNOWN));
+    await client.walletBreakdown(OTHER);
+    await client.walletBreakdown(KNOWN);
+    await caughtPaid(client.agent('base', 42));
+    const agent = await client.agent('base', '42'); // same resource, spelled as a string
+
+    expect(agent.agentId).toBe('42');
+    expect(pay).toHaveBeenCalledTimes(3);
+    expect(server.calls).toHaveLength(8);
+    const [, mine, mineAgain] = sentTo(PATH);
+    const [, other] = sentTo(OTHER_PATH);
+    const [, agentFirst, agentAgain] = sentTo(AGENT_PATH);
+    expect(mineAgain).toBe(mine);
+    expect(other).not.toBe(mine);
+    expect(agentAgain).toBe(agentFirst);
+    expect(agentFirst).not.toBe(mine);
+  });
+
+  it('MOUNTS THE BAD STATE: once the read is delivered the authorization is let go — the next read is a new purchase', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: busy('facilitator_unavailable'),
+      [`${PATH}#3`]: DELIVERED,
+      [`${PATH}#4`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#5`]: DELIVERED,
+    });
+    const pay = spyPayer();
+    const client = paidClient(server, pay);
+
+    await caughtPaid(client.walletBreakdown(KNOWN));
+    await client.walletBreakdown(KNOWN); // the re-send, delivered
+    await client.walletBreakdown(KNOWN); // a second read: one authorization pays one read
+
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.calls).toHaveLength(5);
+    expect(server.calls[3].headers['X-PAYMENT']).toBeUndefined();
+    expect(server.calls[4].headers['X-PAYMENT']).not.toBe(server.calls[2].headers['X-PAYMENT']);
+  });
+
+  it('MOUNTS THE BAD STATE: concurrency — calls share the authorization in flight, and a late answer never puts back, nor drops, the wrong one', async () => {
+    // A fetch whose paid answers the test releases by hand, in the order it
+    // chooses: the only way to put a slow request next to a fast one.
+    const parked: Array<(response: Response) => void> = [];
+    const sent: string[] = [];
+    const json = { 'content-type': 'application/json' };
+    const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: json });
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const header = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      if (!header) return answer(402, CHALLENGE_402);
+      sent.push(header);
+      return new Promise<Response>((resolve) => parked.push(resolve));
+    }) as typeof fetch;
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const last = () => sent[sent.length - 1];
+
+    // 1. Two calls at once for one resource: ONE signature, sent by both.
+    const a = call();
+    await flush();
+    const b = call();
+    await flush();
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(2);
+    const h1 = sent[0];
+    expect(sent[1]).toBe(h1);
+
+    // 2. `a` is delivered while `b` still has H1 out: H1 is NOT let go — `b`
+    //    took it too. `b` answers late with a 503: the read H1 bought for `b`
+    //    is now OWED to it.
+    parked.shift()!(answer(200, WALLET_BREAKDOWN));
+    await a;
+    parked.shift()!(answer(503, { error: 'facilitator_unavailable' }));
+    await b;
+
+    // 3. So the next call — `b`'s retry, exactly as its error told it —
+    //    re-sends H1 and signs nothing. Delivered with nobody else on it and
+    //    nothing owed: NOW H1 is let go.
+    //    ⚠️ Until c0der's round 1 (P1-1) steps 2-3 read *"`a` is delivered,
+    //    which releases H1 … So the next read is a new purchase, H2"*. That was
+    //    the double payment: `b` paid for its read with H1, was told to re-send
+    //    H1, and its retry bought the read again with H2.
+    const bRetry = call();
+    await flush();
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(last()).toBe(h1);
+    parked.shift()!(answer(200, WALLET_BREAKDOWN));
+    await bRetry;
+
+    // 4. The next read is a new purchase, H2 — and `d` shares it.
+    const c = call();
+    await flush();
+    expect(pay).toHaveBeenCalledTimes(2);
+    const h2 = last();
+    expect(h2).not.toBe(h1);
+    const d = call();
+    await flush();
+    expect(last()).toBe(h2);
+
+    // 5. `d` gets a 503; THEN `c` — H2's first send — meets a 402
+    //    `payment_required` (a proxy stripped the header). H2 was sent twice,
+    //    so that 402 does not speak for `d`'s send: H2 stays held. (The
+    //    opposite order — the FIRST send answered first — is the R3 test.)
+    parked.pop()!(answer(503, { error: 'facilitator_unavailable' }));
+    await d;
+    parked.shift()!(answer(402, CHALLENGE_402));
+    const cErr = await caughtPaid(c.then((v) => { if (v instanceof Error) throw v; return v; }));
+    expect(cErr.payment.resend).toBe('same-header');
+
+    // 6. A re-send of H2 is in flight: forgetting it is refused, force or not.
+    const e = call();
+    await flush();
+    expect(last()).toBe(h2);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(client.forgetAuthorization(cErr)).toBe('in-flight');
+    expect(client.forgetAuthorization(cErr, { force: true })).toBe('in-flight');
+    //    A second re-send of H2 meets PAYMENT_VERIFICATION_FAILED: H2 is let go
+    //    while `e` is still out, and the next call signs H3.
+    const x = call();
+    await flush();
+    expect(last()).toBe(h2);
+    parked.pop()!(answer(402, { ...CHALLENGE_402, error: 'PAYMENT_VERIFICATION_FAILED' }));
+    const xErr = await caughtPaid(x.then((v) => { if (v instanceof Error) throw v; return v; }));
+    expect(xErr.payment.resend).toBe('new-challenge-ok');
+    const f = call();
+    await flush();
+    expect(pay).toHaveBeenCalledTimes(3);
+    const h3 = last();
+    expect(h3).not.toBe(h2);
+    // cErr was about H2; H3 is not it.
+    expect(client.forgetAuthorization(cErr, { force: true })).toBe('not-held');
+
+    // 7. `e`'s late 200 delivers H2 — and must not drop H3, which is not its own.
+    parked.shift()!(answer(200, WALLET_BREAKDOWN));
+    await e;
+    parked.shift()!(answer(503, { error: 'facilitator_unavailable' }));
+    await f;
+    const g = call();
+    await flush();
+    expect(pay).toHaveBeenCalledTimes(3);
+    expect(last()).toBe(h3);
+    parked.shift()!(answer(200, WALLET_BREAKDOWN));
+    await g;
+    expect(parked).toHaveLength(0); // every parked request was answered
+  });
+
+  // -------------------------------------------------------------------------
+  // c0der's round 1 (2026-11-16): calls that cross BEFORE the signature, the
+  // read each of them is owed, and the two guards whose mutants survived.
+  // -------------------------------------------------------------------------
+
+  /** A Response shaped like describe.net's, for the fetches written by hand below. */
+  const reply = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const unconfirmed = () =>
+    reply(
+      503,
+      { error: 'settlement_unconfirmed', transaction: SETTLEMENT_TX, retryable: true, retry_after_seconds: 5 },
+      { 'Retry-After': '5' },
+    );
+  const delivered = () => reply(200, WALLET_BREAKDOWN, { 'X-Payment-Receipt': SETTLEMENT_TX });
+  const flushTasks = () => new Promise((resolve) => setTimeout(resolve, 0));
+  /** A call caught with `.catch(e => e)`, thrown again so `caughtPaid` can read it. */
+  const rethrown = (value: unknown) => {
+    if (value instanceof Error) throw value;
+    return value;
+  };
+
+  /**
+   * A fetch whose free asks always get the 402 and whose paid sends get the
+   * next scripted answer, in the order they LEAVE. It counts both, so a test
+   * can say how many challenges were asked for and which header went out.
+   */
+  const scripted = (paid: Array<() => Response>) => {
+    const sends: string[] = [];
+    let freeAsks = 0;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const header = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      if (!header) {
+        freeAsks += 1;
+        return reply(402, CHALLENGE_402);
+      }
+      sends.push(header);
+      // Nothing scripted for this send: a 418 ends every retry loop below
+      // (`reconcile`), and the count of sends shows it happened.
+      return (paid.shift() ?? (() => reply(418, {})))();
+    }) as typeof fetch;
+    return { fetchImpl, sends, freeAsks: () => freeAsks };
+  };
+
+  /** A fetch whose paid sends wait until the test answers them, by index, in the order it chooses. */
+  const parkedFetch = () => {
+    const parked: Array<(response: Response) => void> = [];
+    const sent: string[] = [];
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const header = ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'];
+      if (!header) return reply(402, CHALLENGE_402);
+      sent.push(header);
+      return new Promise<Response>((resolve) => parked.push(resolve));
+    }) as typeof fetch;
+    return { fetchImpl, parked, sent };
+  };
+
+  /** A caller written the way the README tells it: follow `payment.resend` (and, in a test, never sleep). */
+  const followSdk = async (client: DescribeClient): Promise<unknown> => {
+    for (let i = 0; i < 4; i++) {
+      try {
+        return await client.walletBreakdown(KNOWN);
+      } catch (e) {
+        if (!(e instanceof DescribeError) || !e.payment || e.payment.resend === 'reconcile') return e;
+      }
+    }
+    return new Error('still failing after 4 calls');
+  };
+
+  it("R1 — MOUNTS THE BAD STATE: two calls at once for one resource sign ONCE, and whichever is delivered, the other's retry re-sends that authorization — never a second", async () => {
+    // c0der's round 1, P1-1, measured on b8768b99 with this scenario:
+    // `Promise.all` of two reads of one wallet (two components, two backend
+    // requests for one agent). Both found nothing held, both signed, the second
+    // overwrote the first in `#held`, the delivery of one let go of what was
+    // left, and the one that got the 503 — retrying exactly as its error told
+    // it to — signed a THIRD: `R1 pay calls = 3 | sends = 3`.
+    // Both orders, because each is its own guard: the buyer failing while the
+    // call that waited is delivered is `owed` (a delivery may not let go of a
+    // read another call is owed); the buyer delivered while the call that
+    // waited is still out is `readers` (a delivery may not let go while
+    // another call has it out — and a call that waited counts from the hold).
+    const orders: Array<[string, Array<() => Response>]> = [
+      ['the buyer gets the 503, the call that waited is delivered', [unconfirmed, delivered, delivered]],
+      ['the buyer is delivered, the call that waited gets the 503', [delivered, unconfirmed, delivered]],
+    ];
+    for (const [label, script] of orders) {
+      const server = scripted(script);
+      const pay = spyPayer();
+      const client = testClient({ fetchImpl: server.fetchImpl, payer: { pay } });
+
+      const results = await Promise.all([followSdk(client), followSdk(client)]);
+
+      for (const result of results) expect(result, label).toMatchObject({ finalScore: 83.0 });
+      expect(pay, label).toHaveBeenCalledTimes(1);
+      // Both asked — the free ask is never single-flight, it costs nothing —
+      // and the second 402 found the first call buying.
+      expect(server.freeAsks(), label).toBe(2);
+      expect(server.sends, label).toHaveLength(3);
+      expect(new Set(server.sends).size, label).toBe(1); // one authorization, sent three times
+      expect(server.sends[0], label).toBe(await pay.mock.results[0].value);
+    }
+  });
+
+  it('R1b — both calls get a 503: both retries re-send the ONE authorization, both reads are served from it, and only then is it let go', async () => {
+    // Measured on b8768b99: `R1b pay calls = 2 | sends = 4 | A re-sent ever?
+    // false | B re-sent times 2` — A's retry sent B's header, and A's own never
+    // went out again.
+    const server = scripted([unconfirmed, unconfirmed, delivered, delivered, delivered]);
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl: server.fetchImpl, payer: { pay } });
+
+    const results = await Promise.all([followSdk(client), followSdk(client)]);
+
+    for (const result of results) expect(result).toMatchObject({ finalScore: 83.0 });
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(4);
+    expect(new Set(server.sends).size).toBe(1);
+
+    // Both owed reads were handed over: nothing is owed and nobody reads it,
+    // so the NEXT read is a new purchase — the owed count went back to zero.
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.freeAsks()).toBe(3); // the two at once, and this one
+    expect(server.sends[4]).not.toBe(server.sends[0]);
+  });
+
+  it('R1c — MOUNTS THE BAD STATE: two owed reads claimed ONE AT A TIME: each retry re-sends the one authorization — the payer signs once', async () => {
+    // c0der's round 2 (refuter of 6f097af8, P2-1). R1b retries both at once,
+    // so both are counted as readers before either is delivered and `readers`
+    // alone keeps the authorization held: a `join` that claimed EVERY owed
+    // read at once (`owed = 0` for `owed -= 1`, mutant MX4) passed the whole
+    // suite. With it, the first retry is delivered, nothing is owed any more,
+    // the authorization is let go, and the second retry — doing exactly what
+    // its error said — buys again: `pay` = 2, `sent[3] !== sent[0]`.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    expect(sent).toHaveLength(2); // one signature, sent by both
+    parked[0](unconfirmed());
+    parked[1](unconfirmed()); // both reads are owed: owed = 2
+    await caughtPaid(a.then(rethrown));
+    await caughtPaid(b.then(rethrown));
+
+    for (let i = 0; i < 2; i++) {
+      // The two retries, one after the other: nobody else has it out.
+      const retry = client.walletBreakdown(KNOWN);
+      await flushTasks();
+      expect(sent[2 + i], `retry ${i + 1}`).toBe(sent[0]);
+      parked[2 + i](delivered());
+      expect((await retry).finalScore).toBe(83.0);
+    }
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(4);
+
+    // Both owed reads handed over: the books close, and the NEXT read is a
+    // new purchase.
+    const fresh = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(sent[4]).not.toBe(sent[0]);
+    parked[4](delivered());
+    expect((await fresh).finalScore).toBe(83.0);
+  });
+
+  it('R2 — a second call while the first is still inside payer.pay (a human approving it in PayBox) waits for THAT signature instead of asking for its own', async () => {
+    // Measured on b8768b99: `R2 pay calls = 2 | sends = 2` — the second call
+    // asked, was challenged and paid while the first one waited for approval.
+    let approve: () => void = () => undefined;
+    const approved = new Promise<void>((resolve) => {
+      approve = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let signed = 0;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      await approved;
+      return envelope(++signed, validBefore);
+    });
+    const server = scripted([delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(1); // `a` is inside the payer, waiting for a human
+    const b = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    // `b` had every chance to pay on its own while `a` waited: it asked (free),
+    // got its 402, found `a` buying, and is waiting for that signature.
+    expect(server.freeAsks()).toBe(2);
+    expect(pay).toHaveBeenCalledTimes(1);
+
+    approve();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.finalScore).toBe(83.0);
+    expect(rb.finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).toBe(server.sends[0]);
+  });
+
+  it('R2b — MOUNTS THE BAD STATE: when the call buying the signature ends without one (its payer declined), the calls waiting on it start over — and share ONE new signature', async () => {
+    let decide: () => void = () => undefined;
+    const decided = new Promise<void>((resolve) => {
+      decide = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let calls = 0;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      calls += 1;
+      if (calls === 1) {
+        await decided;
+        throw new Error('declined by the human in PayBox');
+      }
+      return envelope(calls, validBefore);
+    });
+    const server = scripted([delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    const b = client.walletBreakdown(KNOWN);
+    const c = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(1); // `b` and `c` wait on `a`'s signature
+
+    decide();
+    const declined = await a;
+    expect(declined).toBeInstanceOf(Error);
+    expect(failedAfterPaying(declined)).toBe(false); // the payer's own throw: nothing was sent
+    const [rb, rc] = await Promise.all([b, c]);
+    expect(rb.finalScore).toBe(83.0);
+    expect(rc.finalScore).toBe(83.0);
+    // One declined, one signed — not one per waiter, and nobody left hanging.
+    expect(pay).toHaveBeenCalledTimes(2);
+    // One free ask each: the waiter that bought next used the 402 it had.
+    expect(server.freeAsks()).toBe(3);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).toBe(server.sends[0]);
+  });
+
+  it('R3 — MOUNTS THE BAD STATE: the FIRST send answered payment_required while a re-send of the same header is still out — it stays held, and the payer signs once', async () => {
+    // c0der's round 1, P2-1: mutant MR14 (count `sent` when the answer
+    // arrives instead of when the send leaves) survived this whole file,
+    // because the only test of the rule (the concurrency one above, step 5)
+    // answers the RE-send first. Here the first send answers first, while the
+    // second one is still out and may be settling.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+
+    const first = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    const second = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]);
+
+    // A proxy stripped the header from the FIRST send.
+    parked[0](reply(402, CHALLENGE_402));
+    const firstErr = await caughtPaid(first.then(rethrown));
+    expect(firstErr.payment.resend).toBe('same-header');
+    expect(firstErr.message).not.toMatch(/new challenge/);
+    parked[1](reply(503, { error: 'settlement_in_progress' }));
+    await caughtPaid(second.then(rethrown));
+
+    // Both reads are owed; the next call re-sends the same authorization.
+    const again = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    parked[2](delivered());
+    expect((await again).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(sent[2]).toBe(sent[0]);
+  });
+
+  it("forgetAuthorization refuses until validBefore + 15 s, to the millisecond — describe.net's own MARGEN_FIRMA_MS (dn-pay.js:714)", async () => {
+    // c0der's round 1, P2-2: mutant MR5 (15 -> 0) passed the whole suite,
+    // because the only test that touched the margin computed its edge from
+    // the imported constant. The literal 15 is the point of this test: it is
+    // `MARGEN_FIRMA_MS = 15000` in `describe-net/site/dn-pay.js:714`
+    // (origin/main 3b6753d, read 2026-11-16), and `config.test.ts` pins it too.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const validBefore = T0_MS / 1000 + 60;
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: conflict('authorization_spent'),
+    });
+    const client = paidClient(server, spyPayer(validBefore));
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+
+    vi.setSystemTime((validBefore + 14) * 1000);
+    expect(client.forgetAuthorization(err)).toBe('may-still-execute');
+    vi.setSystemTime((validBefore + 15) * 1000 - 1);
+    expect(client.forgetAuthorization(err)).toBe('may-still-execute');
+    vi.setSystemTime((validBefore + 15) * 1000);
+    expect(client.forgetAuthorization(err)).toBe('forgotten');
+  });
+
+  it('a call that ended in a timeout, a dead socket or an unreadable 200 is OVER: forgetAuthorization recognises its error and never answers in-flight for it', async () => {
+    // A P3 of c0der's round 1 (MR2, MR3), taken because this round rewrote
+    // exactly that bookkeeping: an error that is not recognised ("not-held")
+    // or a call that never stops counting ("in-flight" forever) both fail on
+    // the safe side, but leave the documented way out untested.
+    const endings: Array<[string, Route]> = [
+      ['timeout', { hang: true }],
+      ['dead socket', { throws: new TypeError('fetch failed') }],
+      ['a 200 whose JSON lacks its shape', { body: { unexpected: true } }],
+    ];
+    for (const [label, route] of endings) {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(T0_MS);
+      const validBefore = T0_MS / 1000 + 60;
+      const server = mockServer({ [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 }, [`${PATH}#2`]: route });
+      const client = paidClient(server, spyPayer(validBefore));
+      const err = await caughtPaid(client.walletBreakdown(KNOWN));
+      expect(client.forgetAuthorization(err), label).toBe('may-still-execute');
+      vi.setSystemTime((validBefore + 15) * 1000);
+      expect(client.forgetAuthorization(err), label).toBe('forgotten');
+      vi.useRealTimers();
+    }
+  });
+
+  it('MOUNTS THE BAD STATE: an authorization that is gone never comes back — a late 503 to a send of it does not overwrite what the next call holds', async () => {
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    expect(sent).toHaveLength(2); // both took H1
+
+    // describe.net refuses H1 on `a`'s send: the whitelist, so it is let go —
+    // for every call that shared it (paybox.md step 7: nothing was settled).
+    parked[0](reply(402, { ...CHALLENGE_402, error: 'PAYMENT_VERIFICATION_FAILED' }));
+    expect((await caughtPaid(a.then(rethrown))).payment.resend).toBe('new-challenge-ok');
+
+    // The next read buys H2, while `b`'s send of H1 is still out.
+    const c = call();
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(2);
+    const h2 = sent[2];
+    expect(h2).not.toBe(sent[0]);
+
+    // `b` answers late, with a 503. H1 is gone, and putting it back would
+    // overwrite H2 while `c` has it out: the next call must join H2.
+    parked[1](reply(503, { error: 'facilitator_unavailable' }));
+    await caughtPaid(b.then(rethrown));
+    const d = call();
+    await flushTasks();
+    expect(sent[3]).toBe(h2);
+    expect(pay).toHaveBeenCalledTimes(2);
+    parked[2](delivered());
+    parked[3](delivered());
+    expect(await c).toMatchObject({ finalScore: 83.0 });
+    expect(await d).toMatchObject({ finalScore: 83.0 });
+  });
+
+  it('MOUNTS THE BAD STATE: an owed read re-sent past the receipt window gets a 409 that says the authorization already delivered a read and names forgetAuthorization — not one more "may have moved money"', async () => {
+    // c0der, ratifying `owed` (2026-11-16): the 409 describe.net answers to a
+    // re-send past its receipt window must not reach the integrator as a mute
+    // error. The smaller of the two options offered, with its test: a typed
+    // 409 whose message names the way out (the other, forgetting and buying
+    // again on its own, would make a second payment a reflex).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0_MS);
+    const validBefore = T0_MS / 1000 + 60;
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer(validBefore);
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    parked[0](unconfirmed()); // `a` gets the 503: its read is owed
+    await caughtPaid(a.then(rethrown));
+    parked[1](delivered()); // `b` is delivered: the authorization SETTLED
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+
+    // 31 minutes later — past the longest receipt window (1800 s) — the next
+    // read claims the owed one and re-sends it.
+    vi.setSystemTime(T0_MS + 31 * 60_000);
+    const late = call();
+    await flushTasks();
+    expect(sent[2]).toBe(sent[0]);
+    parked[2](reply(409, { error: 'authorization_already_settled', retryable: false }));
+    const err = await caughtPaid(late.then(rethrown));
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    expect(err.status).toBe(409);
+    expect(err.payment.resend).toBe('reconcile');
+    expect(err.message).toContain('already delivered a read paid with this authorization');
+    expect(err.message).toContain('forgetAuthorization(error)');
+    // c0der's round 2 (P3): the condition it names is the one
+    // `forgetAuthorization` applies — the clock margin, not bare `validBefore`.
+    expect(err.message).toContain('`validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` has passed');
+    expect(err.message).toContain('and no other call has it out'); // the readers guard (L1)
+    expect(err.message).toContain('an unreadable `validBefore` needs `{ force: true }`'); // (L2)
+    expect(pay).toHaveBeenCalledTimes(1);
+
+    // The way out works as the message says: forgotten, and the next call buys.
+    expect(client.forgetAuthorization(err)).toBe('forgotten');
+    const again = call();
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(sent[3]).not.toBe(sent[0]);
+    parked[3](delivered());
+    expect(await again).toMatchObject({ finalScore: 83.0 });
+  });
+
+  it('MOUNTS THE BAD STATE: after a delivery, an owed re-send answered with anything but a 409 — 503, 500, 502, 429, a re-sent payment_required, a 400 — does not say it already delivered, and the same-header ones do not name forgetAuthorization', async () => {
+    // c0der's round 2 (refuter of 6f097af8, P2-2b). The 409 sentence is the
+    // only one in this SDK that says "not a payment in doubt" and names the
+    // door to a second payment. A condition that dropped `status === 409`
+    // (mutant MX10) passed the suite and put it on a 503 whose own advice
+    // says the opposite — re-send the SAME one — pushing the caller to buy
+    // again a read it is owed.
+    // ⚠️ The first version of this test sent only the 503, and this round's
+    // own refuter kept `status !== 503` and `status < 500` alive with it: a
+    // 429 or a re-sent `payment_required` (both `same-header`,
+    // `errors.ts::resendAfterPaying`) would have carried the sentence. So it
+    // runs over one answer of each kind that is not a 409.
+    const answers: Array<[string, () => Response, PaymentResend]> = [
+      ['503 facilitator_unavailable', () => reply(503, { error: 'facilitator_unavailable', retryable: true }), 'same-header'],
+      ['500', () => reply(500, { error: 'internal_error' }), 'same-header'],
+      ['502', () => reply(502, { error: 'bad_gateway' }), 'same-header'],
+      ['429', () => reply(429, { error: 'rate_limited' }, { 'Retry-After': '2' }), 'same-header'],
+      ['402 payment_required on a re-send', () => reply(402, { ...CHALLENGE_402, error: 'payment_required' }), 'same-header'],
+      ['400', () => reply(400, { error: 'bad_request' }), 'reconcile'],
+    ];
+    for (const [label, answer, resend] of answers) {
+      const { fetchImpl, parked, sent } = parkedFetch();
+      const pay = spyPayer();
+      const client = testClient({ fetchImpl, payer: { pay } });
+      const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+      const a = call();
+      await flushTasks();
+      const b = call();
+      await flushTasks();
+      parked[0](unconfirmed()); // `a` gets the 503: its read is owed
+      await caughtPaid(a.then(rethrown));
+      parked[1](delivered()); // `b` is delivered: `delivered` = 1, still held for `a`'s read
+      expect(await b, label).toMatchObject({ finalScore: 83.0 });
+
+      const late = call();
+      await flushTasks();
+      expect(sent[2], label).toBe(sent[0]);
+      parked[2](answer());
+      const err = await caughtPaid(late.then(rethrown));
+      expect(err, label).toBeInstanceOf(DescribeHTTPError);
+      expect(err.payment.resend, label).toBe(resend);
+      expect(err.message, label).not.toContain('already delivered');
+      expect(err.message, label).not.toContain('not a payment in doubt');
+      if (resend === 'same-header') {
+        expect(err.message, label).toContain('re-sends the SAME');
+        expect(err.message, label).not.toContain('forgetAuthorization');
+      }
+
+      // And it does what its advice says: the next call re-sends it and is served.
+      const retry = call();
+      await flushTasks();
+      expect(sent[3], label).toBe(sent[0]);
+      parked[3](delivered());
+      expect(await retry, label).toMatchObject({ finalScore: 83.0 });
+      expect(pay, label).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('MOUNTS THE BAD STATE: the whitelist 402 is not a delivery — a 409 to another send of that authorization, still out when it was refused, does not say it SETTLED', async () => {
+    // c0der's round 2, from this worker's own sweep of the guard next to
+    // MX16: `delivered` counted on a 'refused' ending (`ending !== 'owed'`,
+    // mutant MX16b) passed the suite with the two tests above, and put "it
+    // SETTLED … not a payment in doubt" on a 409 for an authorization
+    // describe.net had just said settled nothing.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    expect(sent).toHaveLength(2); // both took H1
+
+    parked[0](reply(402, { ...CHALLENGE_402, error: 'PAYMENT_VERIFICATION_FAILED' }));
+    expect((await caughtPaid(a.then(rethrown))).payment.resend).toBe('new-challenge-ok');
+
+    parked[1](reply(409, { error: 'authorization_spent', retryable: false }));
+    const err = await caughtPaid(b.then(rethrown));
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    expect(err.status).toBe(409);
+    expect(err.payment.resend).toBe('reconcile');
+    expect(err.message).toContain('may already have moved money');
+    expect(err.message).not.toContain('already delivered');
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+
+  it('MOUNTS THE BAD STATE: the free ask is never single-flight — five reads the route answers for free run side by side, and four that time out fail together', async () => {
+    // P2-A of this round's own refuter, measured on its first draft (which
+    // put the single-flight before the free ask): the partner rail, where the
+    // metered route answers 200 for free, ran five concurrent reads ONE at a
+    // time, and four reads during an outage failed at 1x..4x `timeoutMs`.
+    // Counted at the fetch, so the assertion is the concurrency itself, not a
+    // clock on a loaded machine.
+    let open = 0;
+    let peak = 0;
+    const freeFetch = (async () => {
+      open += 1;
+      peak = Math.max(peak, open);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      open -= 1;
+      return reply(200, WALLET_BREAKDOWN);
+    }) as typeof fetch;
+    const free = testClient({ fetchImpl: freeFetch, payer: { pay: spyPayer() } });
+    const reads = await Promise.all(Array.from({ length: 5 }, () => free.walletBreakdown(KNOWN)));
+    for (const read of reads) expect(read.finalScore).toBe(83.0);
+    expect(peak).toBe(5);
+
+    // An outage: nothing answers, and each request dies on its own timer.
+    let hanging = 0;
+    let hangPeak = 0;
+    const deadFetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        hanging += 1;
+        hangPeak = Math.max(hangPeak, hanging);
+        init?.signal?.addEventListener('abort', () => {
+          hanging -= 1;
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      })) as typeof fetch;
+    const dead = testClient({ fetchImpl: deadFetch, timeoutMs: 50, payer: { pay: spyPayer() } });
+    const failures = await Promise.all(
+      Array.from({ length: 4 }, () => dead.walletBreakdown(KNOWN).catch((e: unknown) => e)),
+    );
+    for (const failure of failures) {
+      expect(failure).toBeInstanceOf(DescribeError);
+      expect((failure as DescribeError).kind).toBe('timeout');
+      expect(failedAfterPaying(failure)).toBe(false); // the free ask: nothing was sent
+    }
+    expect(hangPeak).toBe(4);
+  });
+
+  it('MOUNTS THE BAD STATE: a payer that never answers does not hang every later call — the waiter gives up after timeoutMs having sent and paid nothing, and is not counted when the signature finally comes', async () => {
+    // P2-B of this round's own refuter, measured on its first draft (an
+    // unbounded wait): "b: still waiting after 1 s | c: still waiting after
+    // 0.5 s", with no error to hand to `forgetAuthorization()`.
+    let approve: () => void = () => undefined;
+    const approved = new Promise<void>((resolve) => {
+      approve = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let signed = 0;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      if (signed === 0) await approved; // the first approval is the one nobody gives (yet)
+      return envelope(++signed, validBefore);
+    });
+    const server = scripted([delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, timeoutMs: 50, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    const waited = await client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    expect(waited).toBeInstanceOf(DescribeError);
+    expect((waited as DescribeError).kind).toBe('timeout');
+    expect(failedAfterPaying(waited)).toBe(false); // it sent nothing and paid nothing
+    expect((waited as Error).message).toContain('sent nothing');
+    // And where the way out is NOT (c0der's round 2, P3): nothing is held yet.
+    expect((waited as Error).message).toContain('Until that payer resolves or throws');
+    expect((waited as Error).message).toContain('`forgetAuthorization()` has nothing to drop');
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(0);
+
+    // The approval comes at last. The waiter that gave up is NOT among the
+    // readers: the delivery lets the authorization go, and the waiter's retry
+    // is a new purchase — not a re-send of `a`'s, held forever by a reader
+    // that will never finish.
+    approve();
+    expect((await a).finalScore).toBe(83.0);
+    expect((await client.walletBreakdown(KNOWN)).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).not.toBe(server.sends[0]);
+  });
+
+  it('MOUNTS THE BAD STATE: a call whose free ask comes back AFTER another call held the authorization joins it as a reader — the delivery of one does not let go of the read the other is owed', async () => {
+    // Every request here waits for the test, free asks included, so `b`'s
+    // 402 can be made to arrive after `a` held and sent its authorization.
+    // Found by this round's own mutation run: without the `join` in the 402
+    // loop (mutant N18b) `b` sent the authorization uncounted, its delivery
+    // let go while `a` was still out, and `a`'s retry bought the read again.
+    const calls: Array<{ header: string | undefined; answer: (response: Response) => void }> = [];
+    const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((resolve) => {
+        calls.push({ header: ((init?.headers ?? {}) as Record<string, string>)['X-PAYMENT'], answer: resolve });
+      })) as typeof fetch;
+    let approve: () => void = () => undefined;
+    const approved = new Promise<void>((resolve) => {
+      approve = resolve;
+    });
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    const pay = vi.fn(async (_challenge: X402Challenge) => {
+      await approved;
+      return envelope(1, validBefore);
+    });
+    const client = testClient({ fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    calls[0].answer(reply(402, CHALLENGE_402)); // `a`'s free ask
+    await flushTasks();
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks(); // `b`'s free ask is out, unanswered
+    approve();
+    await flushTasks(); // `a` held its authorization and sent it
+    expect(calls).toHaveLength(3);
+    const h = calls[2].header;
+    expect(h).toBeTruthy();
+
+    calls[1].answer(reply(402, CHALLENGE_402)); // `b`'s 402 arrives now
+    await flushTasks();
+    expect(calls[3].header).toBe(h); // `b` sent the held one — no second signature
+
+    calls[3].answer(delivered()); // `b` is delivered while `a` is still out…
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+    calls[2].answer(unconfirmed()); // …and `a` gets the 503: its read is owed
+    await caughtPaid(a.then(rethrown));
+
+    const retry = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(calls[4].header).toBe(h); // re-sent, not bought again
+    calls[4].answer(delivered());
+    expect((await retry).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+
+  it("MOUNTS THE BAD STATE: under synchronous timer batching (fake timers in a consumer's suite), a waiter whose clock and the signature land in the same turn sends the authorization instead of giving up", async () => {
+    // `vi.advanceTimersByTime` fires both callbacks with no microtask
+    // checkpoint in between: the clock's reaction is queued first, the
+    // payer's right after it, and the payer's continuation counts the waiter
+    // into `readers` before the waiter's continuation reads the clock.
+    // `acquiring.outcome`, set in that same block, is what tells the waiter it
+    // was counted. Without it the waiter throws a timeout, and the
+    // authorization keeps a reader that will never finish: held for ever,
+    // `'in-flight'` for ever.
+    // ⚠️ Node and browsers drain microtasks between timers, so in production
+    // this turn does not happen: the waiter gives up BEFORE the hold, is
+    // never counted, and the next read is a new purchase (measured by the
+    // round's refuter, vuelta 2, with `advanceTimersByTimeAsync` and with real
+    // timers). The guard is for suites that batch timers synchronously.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const drain = async () => {
+      for (let i = 0; i < 200; i++) await Promise.resolve();
+    };
+    const validBefore = Math.floor(Date.now() / 1000) + 300;
+    let sign: (header: string) => void = () => undefined;
+    const pay = vi.fn(
+      (_challenge: X402Challenge) =>
+        new Promise<string>((resolve) => {
+          sign = resolve;
+        }),
+    );
+    const server = scripted([delivered, delivered, delivered]);
+    const client = testClient({ fetchImpl: server.fetchImpl, timeoutMs: 50, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN);
+    await drain();
+    expect(pay).toHaveBeenCalledTimes(1); // `a` is inside its payer
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await drain(); // `b` got its 402 and is waiting, its clock due at +50 ms
+    // Scheduled AFTER `b`'s clock with the same deadline: it fires right after it.
+    setTimeout(() => sign(envelope(1, validBefore)), 50);
+    vi.advanceTimersByTime(50);
+    await drain();
+
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+    expect((await a).finalScore).toBe(83.0);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.sends).toHaveLength(2);
+    expect(server.sends[1]).toBe(server.sends[0]);
+    // Both readers finished: it was let go, and the next read is a purchase.
+    const next = client.walletBreakdown(KNOWN);
+    await drain();
+    expect(pay).toHaveBeenCalledTimes(2);
+    sign(envelope(2, validBefore));
+    await drain();
+    expect((await next).finalScore).toBe(83.0);
+  });
+
+  it('serverError is capped at 120 chars and nextAction at 600 — server-written text, not a place for a whole body', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { status: 503, body: { error: 'E'.repeat(500), next_action: 'n'.repeat(2000), retryable: false } },
+    });
+    const err = await caughtPaid(paidClient(server, spyPayer()).walletBreakdown(KNOWN));
+    expect(err.payment.serverError).toBe(`${'E'.repeat(120)}…`);
+    expect(err.payment.nextAction).toBe(`${'n'.repeat(600)}…`);
+    expect(err.payment.retryable).toBe(false);
+  });
+
+  it('MOUNTS THE BAD STATE: a paid 200 whose JSON lacks its shape carries `payment` and is re-sent — it used to say "nothing was transmitted"', async () => {
+    const server = mockServer({
+      [`${PATH}#1`]: { status: 402, body: CHALLENGE_402 },
+      [`${PATH}#2`]: { body: { unexpected: true }, headers: { 'X-Payment-Receipt': SETTLEMENT_TX } },
+      [`${PATH}#3`]: DELIVERED,
+    });
+    const pay = spyPayer();
+    const client = paidClient(server, pay);
+
+    const err = await caughtPaid(client.walletBreakdown(KNOWN));
+    expect(err.kind).toBe('unparseable');
+    expect(err.payment).toMatchObject({ settlement: 'settled', receipt: SETTLEMENT_TX, status: 200, resend: 'same-header' });
+    expect(err.message).toContain('AFTER paying');
+    expect(err.message).toContain('went through');
+
+    await client.walletBreakdown(KNOWN);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
   });
 });
 

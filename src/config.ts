@@ -132,6 +132,39 @@ export const PARTNER_CHAIN_ID = 8453;
 export const PARTNER_KEY_ENV = 'DESCRIBE_PARTNER_PRIVATE_KEY';
 
 /**
+ * The longest `Retry-After` this SDK repeats back to you, in seconds: **30**.
+ *
+ * Not ours either: it is the ceiling describe.net's paywall puts on its OWN
+ * `Retry-After` when the facilitator asks for one (`RETRY_AFTER_CEILING_SECONDS
+ * = 30`, `describe-net/describenet/paywall.py:179`, read 2026-11-16), with the
+ * reason written next to it — a misconfigured deploy that asks for 3600 s may
+ * say "later", it may not park a buyer for an hour. The paywall's own default is
+ * 5 s (`FACILITATOR_RETRY_AFTER_SECONDS`). A value above the ceiling arrives in
+ * `PaymentAttempt.retryAfterSeconds` as 30, never as what was served: it is a
+ * wait the caller is told to honour before re-sending an authorization, and
+ * the authorizations `uvd-x402-sdk` signs live 60 s on five of its six chains.
+ */
+export const MAX_RETRY_AFTER_SECONDS = 30;
+
+/**
+ * How long past an authorization's `validBefore` it may still execute, as far
+ * as this client is concerned: **15 s** of clock skew. Read by
+ * `DescribeClient.forgetAuthorization()`, which refuses (`'may-still-execute'`)
+ * until `validBefore` + this has passed — and by NOTHING that releases an
+ * authorization on its own: the client never lets go by the clock (see
+ * `client.ts`, `#held`).
+ *
+ * 🔴 ADDED to `validBefore`, never subtracted. `validBefore` was stamped by the
+ * payer's clock and is enforced against the chain's `block.timestamp`: with
+ * this machine X s ahead of the chain, an authorization that looks expired here
+ * can still be mined for X more seconds, and a second one signed inside that
+ * window is two payments for one read. The number is describe.net's own pay
+ * bar's (`MARGEN_FIRMA_MS = 15000`, `describe-net/site/dn-pay.js:714`, chosen in
+ * c0der's RONDA1 of 2026-10-09); a larger skew is not visible from here.
+ */
+export const AUTHORIZATION_EXPIRY_MARGIN_SECONDS = 15;
+
+/**
  * The package version, for the `User-Agent`.
  *
  * MeshRelay reads its version from `package.json` at runtime because "a
@@ -146,7 +179,7 @@ export const PARTNER_KEY_ENV = 'DESCRIBE_PARTNER_PRIVATE_KEY';
  * time instead of at runtime. Bumping the version without the constant is a
  * red test, not a silent lie in someone's access log.
  */
-export const SDK_VERSION = '0.5.0';
+export const SDK_VERSION = '0.6.0';
 
 /** `uvd-describe-sdk-ts/0.1.0`, plus `(+<product>)` when the caller names itself. */
 export const SDK_NAME = 'uvd-describe-sdk-ts';
