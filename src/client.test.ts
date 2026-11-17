@@ -1402,6 +1402,11 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     // The threshold it names is the one `forgetAuthorization` applies, margin
     // included (c0der's round 2, P3 — it read "past `validBefore`").
     expect(first.message).toContain('past `error.payment.validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`');
+    // And the two clauses that stop a caller from buying again an
+    // authorization that settled — unpinned until this round's own refuter
+    // deleted each and the suite stayed green (vuelta 2, L4 and L5).
+    expect(first.message).toContain('look on-chain for the transfer to `payTo`');
+    expect(first.message).toContain('AND no transfer of it is on-chain');
     // Never delivered: this 409 IS a payment in doubt, and must not say otherwise.
     expect(first.message).not.toContain('already delivered');
     // 300 s from expiring, it can still execute: refused, whatever the caller thinks.
@@ -2188,6 +2193,8 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     // c0der's round 2 (P3): the condition it names is the one
     // `forgetAuthorization` applies — the clock margin, not bare `validBefore`.
     expect(err.message).toContain('`validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` has passed');
+    expect(err.message).toContain('and no other call has it out'); // the readers guard (L1)
+    expect(err.message).toContain('an unreadable `validBefore` needs `{ force: true }`'); // (L2)
     expect(pay).toHaveBeenCalledTimes(1);
 
     // The way out works as the message says: forgotten, and the next call buys.
