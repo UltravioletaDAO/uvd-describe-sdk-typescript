@@ -645,3 +645,134 @@ export const WALLET_FREE_THIN_CHAIN = {
     freshness_version: 'freshness@1',
   },
 };
+
+// ---------------------------------------------------------------------------
+// Added 2026-11-17 (0.7.0) — `GET /reputation/by-resource`, free
+// ---------------------------------------------------------------------------
+
+/** The two URLs `BY_RESOURCE` was asked about, in the order they were sent. */
+export const BY_RESOURCE_URLS = [
+  'https://api.describe.net/reputation/wallet',
+  'https://api.example.com/v1/prices',
+] as const;
+
+/**
+ * `GET /reputation/by-resource?url=<BY_RESOURCE_URLS[0]>&url=<BY_RESOURCE_URLS[1]>`,
+ * captured 2026-11-17T03:27:44Z, value for value (`util.isDeepStrictEqual`
+ * against the saved body: `true`; headers `cache-control: public,
+ * max-age=300`, `Ratelimit-Policy: 1;w=1;burst=1`).
+ *
+ * Row 0 is describe.net's OWN metered route, `found` and `alive`: six collector
+ * rows, one per chain of its 402, all the same agent and the same counts — six
+ * rows are six networks, not six counterparties. Row 1 is the schema's own
+ * example URL, `not_in_bazaar`. Neither URL comes back, and no address does:
+ * the order is the only key.
+ */
+export const BY_RESOURCE = {
+  resources: [
+    {
+      status: 'found',
+      listing_health: 'alive',
+      collectors_checkable: true,
+      collectors: [
+        {
+          network: 'eip155:8453',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+        {
+          network: 'eip155:43114',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+        {
+          network: 'eip155:42161',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+        {
+          network: 'eip155:10',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+        {
+          network: 'eip155:137',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+        {
+          network: 'eip155:42220',
+          identity_status: 'erc8004_identity',
+          has_identity: true,
+          identity_count: 12,
+          agent: { network: 'base', agent_id: '31995' },
+          reviews: {
+            has_reputation: true,
+            total_reviews: 71,
+            distinct_raters: 8,
+            chains_with_reputation: 2,
+            last_eligible_rating_at: '2026-04-26T06:40:43Z',
+          },
+        },
+      ],
+      collectors_omitted: 0,
+      bazaar_read_at: '2026-11-17T03:27:44.318208Z',
+    },
+    {
+      status: 'not_in_bazaar',
+      listing_health: null,
+      collectors_checkable: null,
+      collectors: [],
+      collectors_omitted: 0,
+      bazaar_read_at: '2026-11-17T03:27:44.312961Z',
+    },
+  ],
+  bazaar: 'https://facilitator.ultravioletadao.xyz/discovery/resources',
+  source: 'chain_rankings_mv',
+  refreshed_at: '2026-11-17T02:51:38.297174Z',
+};

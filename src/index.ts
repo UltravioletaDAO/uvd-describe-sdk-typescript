@@ -33,8 +33,8 @@
  *
  * ## The free routes degrade, the paid routes do not
  *
- * `wallet()`, `leaderboard()` and `health()` return `null` when describe.net
- * cannot be reached (that is `failOpen`, on by default, always announced
+ * `wallet()`, `leaderboard()`, `health()` and `byResource()` return `null` when
+ * describe.net cannot be reached (that is `failOpen`, on by default, always announced
  * through `onFailure`). `walletBreakdown()` and `agent()` return no `null` at
  * all and throw instead — including with `failOpen: true` — because between
  * signing a payment and reading the answer there is a window where the USDC has
@@ -176,6 +176,7 @@ export type {
   Freshness,
   FreshnessScope,
   AgentReputation,
+  ByResourceReputation,
   Concentration,
   Confidence,
   Facet,
@@ -186,6 +187,11 @@ export type {
   Ownership,
   PaymentEvidence,
   Rating,
+  RatingsPage,
+  ResourceAgent,
+  ResourceCollector,
+  ResourceReputation,
+  ResourceReviews,
   Sealed,
   SelfRated,
   Snapshot,
@@ -206,6 +212,7 @@ export type {
  */
 export {
   parseAgentReputation,
+  parseByResource,
   parseHealth,
   parseLeaderboard,
   parseWalletBreakdown,

@@ -14,7 +14,64 @@ header.
 This file starts at 0.4.0. The versions before it are summarised from their
 commits, so they are shorter than they deserve — `git log` has the measurements.
 
+## 0.7.0 — 2026-11-17 (not published yet)
+
+The npm release after 0.6.0, which is on npm since 2026-11-17: `publish.yml`
+run 44008656884 (`workflow_dispatch` on `main` 0939094, success) logged
+`+ uvd-describe-sdk@0.6.0` at 03:15:50Z, and the registry stamps the version
+03:19:58Z (`time["0.6.0"]` of `https://registry.npmjs.org/uvd-describe-sdk`,
+read without a token).
+
+### Why — the live schema moved
+
+`npm run schema:check` went red on 2026-11-17 with 8 structural changes
+against the vendored `schema/openapi.json` (c0der's run 44000050053, job *Live
+schema still matches schema/openapi.json*): six new paths and two new required
+fields of `AgentScore`. No PR caused it — describe.net advanced
+(describe-net #80 and #94). `schema/` is re-vendored from describe-net
+`3b6753d`. Compared against the live spec on 2026-11-17: `components` is the
+same content (only the key order differs) and so are the paths; what differs is
+the rate-limit figures (`info.x-rate-limit-policy`, `info.description` and the
+429 descriptions), which the deployment publishes with its own values.
+
+### Added
+
+- **`AgentReputation.ratingsTotal` and `.ratingsPage`** (`ratings_total`,
+  `ratings_page` → `RatingsPage`). `null` when the answer does not declare them
+  — never `ratings.length` and never `0` — because a payload stored before
+  describe-net #94 does not say whether it was a page. `agent()` itself still
+  sends no `limit`/`offset`, so a live answer is the whole list.
+  ⚠️ **Type-level break for whoever BUILDS an `AgentReputation`** (a test
+  double, a hand-made fixture): the two fields are required on the interface,
+  so an object literal typed as one stops compiling until it carries them
+  (`null` is a valid value for both). Reading code is unaffected.
+- **`byResource(urls)`** — `GET /reputation/by-resource`, **free**: who
+  collects at an x402 resource, asked by its URL, with no address in the
+  answer. Fail-open like `wallet()` (`null` announced; a 422 throws). The order
+  is the only key, so an answer whose row count is not the number of URLs sent
+  is refused, and `parseByResource()` (exported, for stored answers) refuses a
+  row it cannot read instead of dropping it. An empty list throws a `TypeError`
+  before any request. Types `ByResourceReputation`, `ResourceReputation`,
+  `ResourceCollector`, `ResourceAgent`, `ResourceReviews`.
+  🔴 Rows repeat the same agent (six rows, one agent on describe.net's own
+  listing) and `agent()` is paid: deduplicate by `network` + `agentId` before
+  following the links — the README shows how.
+
+### Not exposed, on purpose
+
+- **`GET /payments/status`** — in `fuera` of `schema/sdk-map.json`. The owner
+  decided on 2026-11-16 (c0der decision 289) that the route must require proof,
+  signed by the payer, that the asker is the payer; until it does, this SDK
+  does not wrap it. Its user is a buyer who does not hold the payment header;
+  this client holds it while the process lives and re-sends it (0.6.0).
+- **The four query forms** `GET /reputation/{wallet,history,agent,rater}` —
+  describe-net's overlay hides them as strict aliases (same handler, same
+  price) of the path forms.
+
 ## 0.6.0 — 2026-11-16 (not published yet)
+
+⚠️ On npm since 2026-11-17 — see 0.7.0 above for the run and the registry
+stamp. The heading is left as it was written, before that run.
 
 The npm release after 0.5.0. 0.5.0 is on npm since 2026-11-16: `publish.yml`
 run 43915333255 logged `+ uvd-describe-sdk@0.5.0` at 17:11:52Z, and the

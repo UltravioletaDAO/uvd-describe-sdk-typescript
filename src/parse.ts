@@ -54,6 +54,7 @@ import { hashField } from './hashes';
 import type {
   Activity,
   AgentReputation,
+  ByResourceReputation,
   Freshness,
   Concentration,
   Confidence,
@@ -64,6 +65,9 @@ import type {
   Ownership,
   PaymentEvidence,
   Rating,
+  RatingsPage,
+  ResourceCollector,
+  ResourceReputation,
   SelfRated,
   Snapshot,
   WalletBreakdown,
@@ -101,6 +105,24 @@ function num(v: unknown, fallback = 0): number {
 
 function optString(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
+}
+
+/**
+ * A count the server DECLARES — a non-negative integer — or `null`. Added
+ * 2026-11-17 (0.7.0) for the fields whose docstring promises "never `0`" on an
+ * undeclared value, because `optNumber` cannot keep that promise: it goes
+ * through `Number()`, and `Number('')`, `Number([])` and `Number(false)` are all
+ * `0` (the refuter of 0.7.0 measured `ratings_total: ""` reading as an agent
+ * with no ratings). describe.net serves these as JSON integers; anything else
+ * is not a declaration.
+ */
+function optCount(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/** A non-empty string, or `null` — for ids, where `''` would be a link to nothing. */
+function optId(v: unknown): string | null {
+  return typeof v === 'string' && v !== '' ? v : null;
 }
 
 function strArray(v: unknown): string[] | null {
@@ -281,6 +303,28 @@ function parseOwnership(v: unknown): Ownership | null {
     undeterminedReviewCount: num(v.undetermined_review_count),
     inheritedShare: optNumber(v.inherited_share),
   };
+}
+
+/**
+ * `ratings_page` → typed, or `null` — never a made-up "whole list" page.
+ * `limit` and `nextOffset` keep their `null`: it is how the server says "not
+ * paged" and "this is the end".
+ *
+ * 🔴 Read WHOLE or not at all — the `parseNotComputed` rule. A `{}` or a
+ * `{offset: 200}` used to come out as `{limit: null, nextOffset: null}`, which
+ * IS the whole-list page: a stored fragment read as "this is every rating"
+ * (the refuter's P2-4, 2026-11-17). All four keys must be there, `offset` and
+ * `returned` as counts and the other two as a count or `null`.
+ */
+function parseRatingsPage(v: unknown): RatingsPage | null {
+  if (!isObj(v)) return null;
+  const offset = optCount(v.offset);
+  const returned = optCount(v.returned);
+  const limit = optCount(v.limit);
+  const nextOffset = optCount(v.next_offset);
+  if (offset === null || returned === null) return null;
+  if ((v.limit !== null && limit === null) || (v.next_offset !== null && nextOffset === null)) return null;
+  return { offset, limit, returned, nextOffset };
 }
 
 /**
@@ -470,10 +514,90 @@ export function parseAgentReputation(
     ownership: parseOwnership(payload.ownership),
     confidence: parseConfidence(payload.confidence),
     ratings: parseRatings(payload.ratings),
+    // `null` when undeclared — never `ratings.length`, never `0`. See the field.
+    ratingsTotal: optCount(payload.ratings_total),
+    ratingsPage: parseRatingsPage(payload.ratings_page),
     payment,
     policyVersion: optString(payload.policy_version),
     caveats: parseCaveats(payload.caveats),
     caveatScope: CAVEAT_SCOPE_METERED,
+    source: optString(payload.source),
+    refreshedAt: optString(payload.refreshed_at),
+    raw: payload,
+  };
+}
+
+/**
+ * One collector row. The `agent` link is all-or-nothing: both halves have to be
+ * non-empty strings, or there is no link — `String(undefined)` used to hand out
+ * `agentId: 'undefined'` (mutant M20) and a missing `network` a `''`, each one a
+ * call to `agent()` about nothing.
+ */
+function parseCollector(c: Obj): ResourceCollector {
+  const agent = isObj(c.agent) ? c.agent : null;
+  const agentNetwork = agent ? optId(agent.network) : null;
+  const agentId = agent ? optId(agent.agent_id) : null;
+  const reviews = c.reviews;
+  return {
+    network: optString(c.network),
+    identityStatus: String(c.identity_status ?? ''),
+    hasIdentity: typeof c.has_identity === 'boolean' ? c.has_identity : null,
+    identityCount: optCount(c.identity_count),
+    agent: agentNetwork !== null && agentId !== null ? { network: agentNetwork, agentId } : null,
+    reviews: isObj(reviews)
+      ? {
+          hasReputation: reviews.has_reputation === true,
+          totalReviews: num(reviews.total_reviews),
+          distinctRaters: optCount(reviews.distinct_raters),
+          chainsWithReputation: num(reviews.chains_with_reputation),
+          lastEligibleRatingAt: optString(reviews.last_eligible_rating_at),
+        }
+      : null,
+  };
+}
+
+/**
+ * `GET /reputation/by-resource` — free. Added 2026-11-17 (0.7.0).
+ *
+ * 🔴 A row of `resources` that is not an object THROWS, and the asymmetry with
+ * `parseRatings` (which drops a bad row) is the point: the URL does not come
+ * back, so a row's POSITION is the only thing that says which URL it answers.
+ * Dropping row 0 would hand row 1's collectors to the first URL asked — a
+ * directory listing an endpoint under somebody else's identity. A collector
+ * row, which has no position to lose, is dropped like a rating.
+ */
+export function parseByResource(payload: unknown): ByResourceReputation {
+  if (!isObj(payload) || !Array.isArray(payload.resources)) {
+    throw new DescribeUnparseable('by-resource response is missing its essential shape (resources)');
+  }
+  // Rule 5: our own output does not go back in. The wire is snake_case and
+  // `refreshedAt` exists only in what THIS function returned, which also
+  // carries a `resources` array and would otherwise "succeed" into rows of
+  // nulls and empty statuses.
+  if ('refreshedAt' in payload) {
+    throw new DescribeUnparseable(
+      'this payload is already parsed (it carries `refreshedAt`, which the wire never does): ' +
+        'do not parse twice. The payload as served is in `.raw`.',
+    );
+  }
+  const resources: ResourceReputation[] = payload.resources.map((r, index) => {
+    if (!isObj(r)) {
+      throw new DescribeUnparseable(
+        `by-resource row ${index} is not an object: every row after it would answer the wrong URL`,
+      );
+    }
+    return {
+      status: String(r.status ?? ''),
+      listingHealth: optString(r.listing_health),
+      collectorsCheckable: typeof r.collectors_checkable === 'boolean' ? r.collectors_checkable : null,
+      collectors: (Array.isArray(r.collectors) ? r.collectors : []).filter(isObj).map(parseCollector),
+      collectorsOmitted: num(r.collectors_omitted),
+      bazaarReadAt: optString(r.bazaar_read_at),
+    };
+  });
+  return {
+    resources,
+    bazaar: optString(payload.bazaar),
     source: optString(payload.source),
     refreshedAt: optString(payload.refreshed_at),
     raw: payload,
