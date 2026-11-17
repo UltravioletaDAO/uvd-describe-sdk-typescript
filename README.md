@@ -61,6 +61,7 @@ And the version with no JavaScript at all, which is most of what most pages need
 | `wallet(address)` | **free** | `GET /wallets/{w}/chains` | `null` + `onFailure` |
 | `leaderboard()` | **free** | `GET /leaderboard` | `null` + `onFailure` |
 | `health()` | **free** | `GET /health` | `null` + `onFailure` |
+| `byResource(urls)` | **free** (0.7.0) | `GET /reputation/by-resource?url=…` | `null` + `onFailure` |
 | `badgeUrl(address)` | **no network** | builds a `/badge/{w}.svg` URL | cannot fail |
 | `profileUrl(address)` | **no network** | builds a describe.net profile URL | cannot fail |
 | `walletBreakdown(address)` | $0.01 — or **free** on the [partner rail](#not-paying-the-partner-rail) | `GET /reputation/wallet/{w}` | **throws, always** |
@@ -961,6 +962,63 @@ thrown, never nulled — and `isKnownAuthorClass()` tells you whether this SDK h
 heard of it. There is no count or score by author class, upstream or here; what
 to do with the rows you bought is your call.
 
+### How many there are: `ratingsTotal` and `ratingsPage` (0.7.0)
+
+`agent()` answers the whole list, so `ratingsTotal` is the length of the list
+describe.net sent and `ratingsPage` reads
+`{ offset: 0, limit: null, returned, nextOffset: null }`.
+Both are `null` on an answer that did not declare them — a payload you stored
+before describe-net #94 added them (merged 2026-10-17) — and never
+`ratings.length` or `0`: a stored payload does not say whether it was a page.
+This SDK does not page; if you read a page some other way, each page is its own
+**paid** request.
+
+---
+
+## Who collects at a resource: `byResource()` (0.7.0)
+
+Ask by the URL of an x402 endpoint instead of by a wallet. describe.net reads
+who collects there from the facilitator's public bazaar and answers, per
+collector, whether it holds an ERC-8004 identity, one agent to link and its
+review counts — **with no address in the answer**, so a directory or a router
+that must never hold a payment address can ask it and store the result:
+
+```ts
+const answer = await describe.byResource([
+  'https://api.describe.net/reputation/wallet',
+  'https://api.example.com/v1/prices',
+]);
+if (answer === null) {
+  // describe.net could not be asked. NOT "these endpoints have no reputation".
+} else {
+  const [describeNet, unknown] = answer.resources; // IN ORDER: no URL comes back
+  describeNet.status;                    // 'found'
+  describeNet.collectors[0].agent;       // { network: 'base', agentId: '31995' }
+  unknown.status;                        // 'not_in_bazaar'
+
+  // Six rows, ONE agent. agent() is paid: follow each distinct pair once.
+  const agents = new Map<string, { network: string; agentId: string }>();
+  for (const c of describeNet.collectors) if (c.agent) agents.set(`${c.agent.network}/${c.agent.agentId}`, c.agent);
+}
+```
+
+* **The order is the only key.** `resources[i]` answers the i-th URL. An answer
+  with a different number of rows is refused (`unparseable`, announced) instead
+  of being handed to you to zip against the wrong list.
+* **A row is a network, not a counterparty.** describe.net's own listing
+  answered six rows on 2026-11-17 — one per chain of its 402, the same agent in
+  each. Do not count rows as collectors, and **deduplicate by `network` +
+  `agentId` before calling `agent()`**: it is paid, and a loop over the rows pays
+  once per row for the same read. An id alone is not unique across chains.
+* `no_erc8004_identity` is **not** bad reputation, and only `found` describes
+  collectors: `lookup_truncated` is not proof of absence and
+  `bazaar_unavailable` means ask again.
+* **An empty list throws** a `TypeError` before any request, `failOpen` or not —
+  it is your bug, not their outage. Guard a list you build dynamically.
+* **Batch, do not loop.** The route allows one request per second
+  (`RateLimit-Policy: 1;w=1;burst=1`, measured 2026-11-17); a loop of single
+  lookups meets a 429, which comes back as an announced `null`.
+
 ---
 
 ## Counting distinct raters
@@ -1021,6 +1079,12 @@ resource; it does not sign a new one (0.6.0, F-A2).
 
 **No writes.** This SDK reads. It never rates anyone, signs nothing on-chain and
 holds no key.
+
+**No `GET /payments/status` (0.7.0).** describe.net's owner decided on
+2026-11-16 that this route must require proof, signed by the payer, that the
+asker is the payer. Until it does, this SDK does not wrap it. Its user is a
+buyer who does not hold the payment header; this client holds it for as long as
+the process lives and re-sends it (0.6.0).
 
 ---
 

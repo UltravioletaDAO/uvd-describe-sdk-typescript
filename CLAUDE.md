@@ -25,13 +25,13 @@ deploy — zip → 2 Lambdas → Terraform → site — behind it).
 | Command | What it does |
 |---|---|
 | `npm install` | 209 packages, ~14 s. All dev — the package itself ships **zero** runtime deps |
-| `npm test` | vitest, **offline**. **389 tests in ~1,4 s** on 2026-11-16, Node 20.20.2, on the Mac (0.6.0 after c0der's round 2: 3 more in `tras pagar` — `R1c`, two owed reads claimed one at a time; the 503 after a delivery that stays `same-header`; and the whitelist 402 that is not a delivery). Before: **386 tests** on 2026-11-16, Node 20.20.2, on the Windows host (0.6.0 after c0der's round 1: 13 more in `tras pagar` — `R1`–`R3`, the 15 s margin, the endings that are over, the authorization that never comes back, the free ask that is never single-flight, the waiter that gives up, the waiter whose clock lands with the signature, the call whose 402 arrives after the hold, and the 409 on an authorization that already delivered — and the two clock literals in `config.test.ts`). Duration NOT measured cleanly: ~2,7 s at 385 tests, then 6–22 s the same evening on a loaded machine, with vitest's `tests` share at 2,8–3,8 s every time; not comparable with the next figure, measured on the Mac. Before: **372 tests in ~1,4 s** the same day, Node 20.20.2 (0.6.0 — the held authorization, F-A2: 27 in the `tras pagar` block of `client.test.ts`). Before: **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
+| `npm test` | vitest, **offline**. **428 tests** on 2026-11-17, Node 20.20.2, on the Windows host (0.7.0: 39 more — `by-resource.test.ts` and `agent-ratings.test.ts`, the new schema-coverage cases in `types.schema.test.ts` and the `/payments/status` and query-form cases in `sdk-map.test.ts`). Duration NOT measured cleanly: 15,3 s on a loaded host, vitest's `tests` share 4,4 s. Before: **389 tests in ~1,4 s** on 2026-11-16, Node 20.20.2, on the Mac (0.6.0 after c0der's round 2: 3 more in `tras pagar` — `R1c`, two owed reads claimed one at a time; the 503 after a delivery that stays `same-header`; and the whitelist 402 that is not a delivery). Before: **386 tests** on 2026-11-16, Node 20.20.2, on the Windows host (0.6.0 after c0der's round 1: 13 more in `tras pagar` — `R1`–`R3`, the 15 s margin, the endings that are over, the authorization that never comes back, the free ask that is never single-flight, the waiter that gives up, the waiter whose clock lands with the signature, the call whose 402 arrives after the hold, and the 409 on an authorization that already delivered — and the two clock literals in `config.test.ts`). Duration NOT measured cleanly: ~2,7 s at 385 tests, then 6–22 s the same evening on a loaded machine, with vitest's `tests` share at 2,8–3,8 s every time; not comparable with the next figure, measured on the Mac. Before: **372 tests in ~1,4 s** the same day, Node 20.20.2 (0.6.0 — the held authorization, F-A2: 27 in the `tras pagar` block of `client.test.ts`). Before: **336 tests** on 2026-09-30, Node 20 (0.5.0 — `widget`; the three `src/widget/*.test.ts` add 88 — 76 in the first delivery, 12 from the refuter's round 1 — and `element.test.ts` runs under happy-dom via its `// @vitest-environment` header, everything else stays in Node). Duration NOT re-measured cleanly that day: the machine was loaded and the pre-widget suite alone took 6,2 s against 1,8 s the same morning. Before: **231 tests in ~1,0 s** (re-measured 2026-09-15 for 0.4.1 — `thin-chain`; were 227 in ~1,3 s at 0.4.0 — `caveatsNotComputed`, `requireFullCaveats`, `authorClass`; were 206 at 0.3.0). Before that: **191 tests in ~1,6 s** (re-measured 2026-08-31 after the fail-loud guards — wrong-door parsers, unknown config keys — and `settlementPending`; were 181 after the `recovery` table, EM's fourth contribution of 2026-08-30; were 168 in ~1,8 s after the first three, 111 in ~0,9 s before them, 93 before the partner rail of the same day, 84 before the paid-route fix). ~0,5 s of the increase is real timers: the jitter's placement can only be asserted from outside, so four tests sleep on purpose (three in `client.test.ts`, one in `jitter.test.ts`). Every client in the suite is built through a `testClient()` helper that sets `jitterMs: 0` — copy that line into your own suite |
 | `npm run typecheck` | `tsc --noEmit` — **excludes `*.test.ts`**. The gate that covers the tests is `npx tsc --noEmit -p tsconfig.eslint.json`, and it is what proves `walletBreakdown()` / `agent()` are not nullable (the test file assigns them to a non-nullable type with no `!`). Run it if you touch a public signature |
 | `npm run lint` | eslint |
 | `npm run build` | tsup → cjs + esm + dts, four entries (`index`, `x402/index`, `partner/index`, `widget/index`; this row said "two" until 0.5.0) |
 | `npm run smoke` | **real** call to the live API. FREE routes only. Needs `npm run build` first |
 | `npm run schema:check` | re-fetch the live OpenAPI, diff against the vendored `schema/openapi.json`, ignoring what `schema/sdk.overlay.yaml` hides |
-| `npm run schema:refresh` | re-vendor `schema/` from a describe-net checkout (`DESCRIBE_NET_DIR`, `DESCRIBE_NET_REF`), then run the tests |
+| `npm run schema:refresh` | re-vendor `schema/` from a describe-net checkout (`DESCRIBE_NET_DIR`, `DESCRIBE_NET_REF`), then run the tests — it does not run them itself, it prints the reminder. ⚠️ The default `DESCRIBE_NET_DIR` is `describe-net` NEXT TO the repo root, which in an Orca worktree (`orca/workspaces/<repo>/<worktree>`) does not exist (resolved 2026-11-17: `…\workspaces\uvd-describe-sdk-typescript\describe-net`, absent). On the Windows host pass `DESCRIBE_NET_DIR=Z:/ultravioleta/dao/describe-net`, and `git -C` that checkout `fetch` first: the default ref is its `origin/main` |
 
 One test file: `npx vitest run src/client.test.ts`.
 
@@ -99,6 +99,11 @@ pay, deliberately.
    may take.
 2. **No function returns a bare score.** Adding a `getScore(): number` erases
    the product's thesis. Every result carries `policyVersion` + `caveats[]`.
+   ⚠️ 0.7.0: `byResource()` carries neither, and it is not an exception to the
+   rule but the rule applied — it returns no score at all, only counts and an
+   identity to link, and the score is one (paid, sealed) `agent()` away. A seal
+   added for symmetry (`policyVersion: null`, `caveats: []`) would be the
+   silence invariant 12 forbids. Defended in `types.ts::ByResourceReputation`.
 3. **The three absences stay distinct**: a returned object with a `null` score
    (no evidence), a `null` return (we could not ask), and a throw (your bug or a
    402). Collapsing any two is the failure mode.
@@ -412,6 +417,16 @@ saying yes.
 
 **`/leaderboard` takes no parameters.** `?limit=2` answers **422**
 `leaderboard_takes_no_params`. Paging is the metered `/leaderboard/page`.
+
+**🔴 Following every `byResource()` row's `agent` pays once per ROW.** Measured
+2026-11-17: describe.net's own listing answers six collector rows — one per
+chain of its 402 — with the same agent in all six, and the refuter of 0.7.0 ran
+`agent()` over them with a spy payer: six signatures for one read. A row is a
+network, not a counterparty. Deduplicate by `network` + `agentId` (an id alone
+is not unique across chains). The test that pins the shape is
+`by-resource.test.ts` › "parses both rows of the captured batch, in order".
+What separates it from its neighbour: the single-flight of 0.6.0 does not help
+— it joins CONCURRENT buys of one resource, and this loop is sequential.
 
 **An unregistered wallet is a 200, not a 404.** `chains: []`,
 `global_score: null`, `distinct_raters: null`. A malformed one is a **422**

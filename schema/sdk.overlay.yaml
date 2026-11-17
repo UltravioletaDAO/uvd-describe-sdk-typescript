@@ -8,10 +8,14 @@
 #
 # Dos clases de operación, y ninguna queda afuera:
 #
-#   * 11 con `x-fern-ignore: true`: la web app (`/auth/*`, `/me*`, sesión por
-#     cookie) y los protocolos de agente (`/mcp`, `/a2a`). No son alcance de un
-#     SDK REST.
-#   * 22 públicas con `x-fern-sdk-group-name` + `x-fern-sdk-method-name`.
+#   * 15 con `x-fern-ignore: true`: la web app (`/auth/*`, `/me*`, sesión por
+#     cookie) y los protocolos de agente (`/mcp`, `/a2a`), que no son alcance de
+#     un SDK REST; y desde el 2026-10-06 las cuatro formas por query de las
+#     rutas medidas, alias de una operación que el SDK ya nombra (11 hasta ese
+#     día).
+#   * 24 públicas con `x-fern-sdk-group-name` + `x-fern-sdk-method-name`
+#     (22 hasta el 2026-10-02; la 23 es `/reputation/by-resource`, PA-D2; la 24
+#     es `/payments/status`, DN-PLUGIN-BACKEND, 2026-10-16).
 #
 # LOS NOMBRES. Donde un SDK ya tiene el método, el nombre es el suyo (camelCase
 # como en `uvd-describe-sdk-typescript`; el generador de Python lo pasa a
@@ -104,6 +108,31 @@ actions:
     update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: agent}
   - target: "$.paths['/reputation/rater/{wallet}'].get"
     update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: rater}
+  # La única GRATIS del grupo (PA-D2, 2026-10-02): por la URL de un recurso x402,
+  # quién cobra ahí y su reputación, sin una dirección. Va acá y no en `wallets`
+  # porque su sujeto no es una wallet — es justo lo que no tiene quien pregunta.
+  - target: "$.paths['/reputation/by-resource'].get"
+    update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: byResource}
+  # El estado de un pago propio (DN-PLUGIN-BACKEND, 2026-10-16): gratis, por
+  # pagador y recurso. Grupo propio porque no es reputación: es lo que un cliente
+  # pregunta después de una compra cuya respuesta no le llegó. Propuesta de este
+  # archivo, sin método en ningún SDK todavía.
+  - target: "$.paths['/payments/status'].get"
+    update: {x-fern-sdk-group-name: payments, x-fern-sdk-method-name: status}
+  # Las FORMAS POR QUERY de las rutas medidas (DN-BAZAAR-SCHEMA, 2026-10-06):
+  # ignoradas, y no con método propio. Son alias estrictos de las cuatro de
+  # arriba —mismo handler, mismo precio— que existen para un router que llena
+  # campos de query desde el `inputSchema` del bazar; un SDK ya tiene el método
+  # de la forma de path, y nombrar las dos le daría al usuario dos métodos que
+  # contestan lo mismo.
+  - target: "$.paths['/reputation/wallet'].get"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/reputation/history'].get"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/reputation/rater'].get"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/reputation/agent'].get"
+    update: {x-fern-ignore: true}
 
   # ── names ─────────────────────────────────────────────────────────────────
   - target: "$.paths['/names/resolve'].get"   # SDK: client.names.resolve() (sólo Python)

@@ -5,7 +5,8 @@
     "GET /leaderboard": "leaderboard",
     "GET /wallets/{wallet}/chains": "wallet",
     "GET /reputation/wallet/{wallet}": "walletBreakdown",
-    "GET /reputation/agent/{network}/{agent_id}": "agent"
+    "GET /reputation/agent/{network}/{agent_id}": "agent",
+    "GET /reputation/by-resource": "byResource"
   },
   "fuera": {
     "GET /names/resolve": "pendiente: par TS de DUP-01",
@@ -24,6 +25,7 @@
     "GET /chains/{network}": "sin método en este SDK",
     "GET /wallets/{wallet}/exists": "sin método en este SDK",
     "GET /reputation/wallet/{wallet}/history": "sin método en este SDK",
-    "GET /reputation/rater/{wallet}": "sin método en este SDK"
+    "GET /reputation/rater/{wallet}": "sin método en este SDK",
+    "GET /payments/status": "decisión 289 del dueño (2026-11-16): sin método hasta que describe.net exija en esta ruta la prueba, firmada por el pagador, de que quien pregunta es el pagador. Su usuario es el comprador que no tiene el header (un wallet que pagó por él); este cliente lo tiene mientras vive el proceso (#held, 0.6.0) y lo reenvía"
   }
 }

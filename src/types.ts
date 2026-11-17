@@ -489,6 +489,30 @@ export interface Ownership {
   inheritedShare: number | null;
 }
 
+/**
+ * Which slice of an agent's ratings one answer carries — `ratings_page`, REQUIRED
+ * in `AgentScore` together with `ratings_total` since describe-net #94
+ * (`c0a97fa`, 2026-10-17; the schema's own description dates P3 2026-10-16).
+ *
+ * Read the two nullable fields, not `returned`: per the schema's own
+ * descriptions, an answer that did not page reads `limit: null` and
+ * `nextOffset: null`, and `ratings` is then the whole list.
+ */
+export interface RatingsPage {
+  /** Index of the first rating returned, from 0. */
+  offset: number;
+  /** The page size asked for, or `null` when the request did not page. Never `0`. */
+  limit: number | null;
+  /** How many ratings this answer carries. */
+  returned: number;
+  /**
+   * The `offset` of the next page, or `null` when this one reaches the end.
+   * ⚠️ Each page is its own PAID request at the same price — a loop over this
+   * field is a loop over payments.
+   */
+  nextOffset: number | null;
+}
+
 /** `GET /reputation/agent/{network}/{agent_id}` — metered ($0.02). */
 export interface AgentReputation extends Sealed {
   network: Network;
@@ -519,7 +543,163 @@ export interface AgentReputation extends Sealed {
   ownership: Ownership | null;
   confidence: Confidence | null;
   ratings: Rating[];
+  /**
+   * How many ratings the agent has IN ALL (`ratings_total`; typed here since
+   * 0.7.0, required upstream since describe-net #94). Without paging it is the
+   * length of the list the server sent — which `ratings` matches unless a row
+   * was not an object and got dropped; with paging it is the size of the list
+   * `ratings` is one page of. A non-integer is not a declaration: `null`.
+   *
+   * 🔴 `null` when the answer did not declare it — a server older than P3, or a
+   * payload stored before then — and deliberately NOT `ratings.length`: that
+   * reconstruction is right only for an answer that did not page, and a stored
+   * payload does not say how it was asked for. Never `0` either: an agent with
+   * no ratings DECLARES `0`, which is a different fact from not declaring.
+   */
+  ratingsTotal: number | null;
+  /**
+   * Which slice of the full list `ratings` is (`ratings_page`). `agent()` sends
+   * no `limit`/`offset`, so on a live answer this is the whole list; it is typed
+   * because the parsers are exported for STORED payloads, and a stored page must
+   * not read as a whole agent — `limit !== null` says it was a page.
+   *
+   * `null` when the answer did not declare it, never a synthesised "whole
+   * list": that is the one thing a payload that said nothing cannot prove.
+   */
+  ratingsPage: RatingsPage | null;
   payment: PaymentEvidence | null;
+}
+
+// ---------------------------------------------------------------------------
+// GET /reputation/by-resource — free, asked by the URL of a paid endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * The identity a collector's row links to: by id, never by owner.
+ * `agent(network, agentId)` takes exactly these two — and is PAID, while rows
+ * repeat the same agent: deduplicate by the PAIR before following the links
+ * (see `byResource()`).
+ */
+export interface ResourceAgent {
+  network: Network;
+  /** A decimal uint256 on EVM chains, a base58 asset id on Solana — an identity, never the collector's address. */
+  agentId: string;
+}
+
+/**
+ * What `GET /wallets/{wallet}/exists` counts, without the wallet. **Counts, not
+ * a score**: `totalReviews` is volume, not agreement.
+ */
+export interface ResourceReviews {
+  /** `false` next to an identity is registered-but-unrated — a different fact from unregistered. */
+  hasReputation: boolean;
+  totalReviews: number;
+  /** 🔴 `null` means "not in the ranking", NEVER `0` — same rule as `WalletReputation.distinctRaters`. */
+  distinctRaters: number | null;
+  chainsWithReputation: number;
+  /** The last rating that counts toward the score. `null` = not known, never a stand-in date. */
+  lastEligibleRatingAt: Timestamp;
+}
+
+/**
+ * One collector of a resource — one row per `accepts[]` entry, and **with no
+ * address in it**: there is no field where one would fit, upstream or here.
+ *
+ * ⚠️ A row is NOT a counterparty. Measured live 2026-11-17 on describe.net's
+ * own listing (`https://api.describe.net/reputation/wallet`): six rows, one per
+ * chain of its 402, with the same agent and the same counts in every one.
+ * Count rows and you count networks; follow each row's `agent` and you pay for
+ * the same read once per row.
+ */
+export interface ResourceCollector {
+  /**
+   * The CAIP-2 network of that `accepts[]` entry (`eip155:8453`, …), or `null`
+   * when it is not one the payment SDK knows: whoever registered the URL wrote
+   * it, and a free-form value can carry anything.
+   */
+  network: string | null;
+  /**
+   * `erc8004_identity` · `no_erc8004_identity` · `not_indexed`. Open, like
+   * `CaveatCode`: a value this SDK has not heard of arrives verbatim.
+   *
+   * 🔴 `no_erc8004_identity` is NOT bad reputation — it is the common case for
+   * bazaar endpoints. `not_indexed` means the collector is neither EVM nor
+   * Solana, so nothing was asked and `hasIdentity` is `null`.
+   */
+  identityStatus: 'erc8004_identity' | 'no_erc8004_identity' | 'not_indexed' | (string & {});
+  /** `null` when nothing was asked (`not_indexed`), never `false`. */
+  hasIdentity: boolean | null;
+  /**
+   * ERC-8004 identities the collector holds across the indexed chains. `null`
+   * when nothing was asked (`not_indexed`) — never `0` for that; a collector that
+   * WAS asked and holds none is `0`, a different fact.
+   */
+  identityCount: number | null;
+  /**
+   * ONE identity to link — not necessarily the most-reviewed one; `identityCount`
+   * says whether there are more. `null` unless both `network` and `agentId`
+   * arrived as non-empty strings: half a link is no link.
+   */
+  agent: ResourceAgent | null;
+  /** `null` when there is neither an identity nor ratings: no reviews to count, which is not reviews that count against it. */
+  reviews: ResourceReviews | null;
+}
+
+/** One URL asked, with what the facilitator's bazaar said about it. The URL itself does not come back. */
+export interface ResourceReputation {
+  /**
+   * `found` · `not_in_bazaar` · `lookup_truncated` · `quarantined` ·
+   * `bazaar_unavailable`. Open, like `CaveatCode`.
+   *
+   * ⚠️ Only `found` describes collectors. `lookup_truncated` is NOT proof of
+   * absence (paging the bazaar is not a consistent snapshot), `quarantined`
+   * listings never have their collectors described, and `bazaar_unavailable`
+   * means ask again — none of the four is "this endpoint has no reputation".
+   */
+  status: 'found' | 'not_in_bazaar' | 'lookup_truncated' | 'quarantined' | 'bazaar_unavailable' | (string & {});
+  /** The prober's last view of a `found` listing (`alive`, `degraded`, …). `null` when not found or not reported. */
+  listingHealth: 'alive' | 'degraded' | 'auth_gated' | 'unknown' | 'unprobeable' | (string & {}) | null;
+  /**
+   * Whether the prober CAN compare the collectors with the live endpoint.
+   * **Necessary, not sufficient** (its last probe can be days old); `false`
+   * means they are only what whoever registered the URL declared. `null` when
+   * not found.
+   */
+  collectorsCheckable: boolean | null;
+  collectors: ResourceCollector[];
+  /** Collectors past the per-resource cap that were not looked up. */
+  collectorsOmitted: number;
+  /** When describe.net read the bazaar for this URL (reads are cached). `null` when the bazaar did not answer. */
+  bazaarReadAt: Timestamp;
+}
+
+/**
+ * `GET /reputation/by-resource` — free. Who collects at an x402 resource, and
+ * their reputation, asked by its URL.
+ *
+ * **Not `Sealed`, on purpose**: there is no score in it to seal. It carries
+ * counts and an identity to link; the score is one `agent()` away, sealed. A
+ * `policyVersion: null` + `caveats: []` added here for symmetry would be the
+ * silence karma-hello's gate mistook for "evaluated, nothing found" (see
+ * `caveatsNotComputed`).
+ *
+ * 🔴 **The order is the only key.** describe.net does not echo the URL —
+ * `resources[i]` answers the i-th URL asked — so `byResource()` refuses an
+ * answer whose row count is not the number of URLs it sent, and
+ * `parseByResource()` refuses a row it cannot read instead of dropping it: one
+ * dropped row shifts every row after it onto the wrong URL.
+ */
+export interface ByResourceReputation {
+  /** One per URL asked, IN ORDER. */
+  resources: ResourceReputation[];
+  /** The public bazaar endpoint the collectors were read from. Repeat any lookup against it. */
+  bazaar: string | null;
+  /** The materialized view the counts come from. */
+  source: string | null;
+  /** When that view was last recomputed. `null` = not recorded, never "just now". */
+  refreshedAt: Timestamp;
+  /** The exact JSON as served. */
+  raw: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

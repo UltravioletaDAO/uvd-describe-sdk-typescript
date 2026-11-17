@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { AUTHOR_CLASSES, CAVEAT_CODES } from './caveats';
+import { BY_RESOURCE } from './__fixtures__/live';
 import {
   parseAgentReputation,
+  parseByResource,
   parseHealth,
   parseLeaderboard,
   parseWalletBreakdown,
@@ -82,6 +84,7 @@ describe('the routes this SDK wraps still exist in the schema', () => {
     ['/health', false],
     ['/reputation/wallet/{wallet}', true],
     ['/reputation/agent/{network}/{agent_id}', true],
+    ['/reputation/by-resource', false],
     ['/badge/{wallet}.svg', false],
   ])('%s is present and metered=%s', (path, metered) => {
     const op = schema.paths[path]?.get as { security?: unknown[] } | undefined;
@@ -114,6 +117,27 @@ describe('hand-written types cover every required field of the schema', () => {
   it('AgentScore -> AgentReputation', () => {
     const parsed = parseAgentReputation({ agent_id: '1' }, null) as unknown as Record<string, unknown>;
     assertCovers('AgentScore', parsed);
+  });
+
+  it('RatingsPage -> RatingsPage', () => {
+    // Added 2026-11-17 (0.7.0). `ratings_page` and `ratings_total` became
+    // REQUIRED in AgentScore with describe-net #94 and the AgentScore case
+    // above went red on the refresh — the gate doing its job.
+    const parsed = parseAgentReputation(
+      { agent_id: '1', ratings_page: { offset: 0, limit: null, returned: 0, next_offset: null } },
+      null,
+    );
+    assertCovers('RatingsPage', parsed.ratingsPage as unknown as Record<string, unknown>);
+  });
+
+  it('ResourceReputationResponse and the four schemas under it -> ByResourceReputation', () => {
+    const parsed = parseByResource(BY_RESOURCE);
+    const [collector] = parsed.resources[0].collectors;
+    assertCovers('ResourceReputationResponse', parsed as unknown as Record<string, unknown>);
+    assertCovers('ResourceReputation', parsed.resources[0] as unknown as Record<string, unknown>);
+    assertCovers('ResourceCollector', collector as unknown as Record<string, unknown>);
+    assertCovers('ResourceAgent', collector.agent as unknown as Record<string, unknown>);
+    assertCovers('ResourceReviews', collector.reviews as unknown as Record<string, unknown>);
   });
 
   it('Rating -> Rating', () => {
@@ -224,7 +248,12 @@ describe('the author classes we export are the schema enum, exactly', () => {
 });
 
 describe('the snapshot is the version we wrote these types against', () => {
-  it('is describe.net 2.0.0 with 32 paths', () => {
+  it('is describe.net 2.0.0 with 38 paths', () => {
+    // 32 until the refresh of 2026-11-17 (0.7.0, describe-net@3b6753d), which
+    // added six: four query forms of the metered routes (hidden by the overlay
+    // as aliases), `/reputation/by-resource` (free, `byResource()`) and
+    // `/payments/status` (free, in `fuera` by the owner's decision 289).
+    // Still additive: `info.version` did not move.
     // 20 until the refresh of 2026-09-15, which added two FREE routes this SDK
     // does not wrap (`GET /categories`, `GET /wallets/{wallet}/exists`) and the
     // two fields 0.4.0 types. `info.version` did not move: both are additive.
@@ -233,6 +262,6 @@ describe('the snapshot is the version we wrote these types against', () => {
     // `/names/resolve` + `/names/reverse` (in `fuera` of `schema/sdk-map.json`).
     // Still additive: `info.version` did not move.
     expect(schema.info.version).toBe('2.0.0');
-    expect(Object.keys(schema.paths)).toHaveLength(32);
+    expect(Object.keys(schema.paths)).toHaveLength(38);
   });
 });

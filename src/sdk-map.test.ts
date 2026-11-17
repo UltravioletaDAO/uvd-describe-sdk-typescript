@@ -49,6 +49,7 @@ const INVOKE: Record<string, (client: DescribeClient) => Promise<unknown>> = {
   health: (c) => c.health(),
   walletBreakdown: (c) => c.walletBreakdown(ADDRESS),
   agent: (c) => c.agent('base', 1),
+  byResource: (c) => c.byResource('https://api.example.com/v1/prices'),
 };
 
 async function record(call: (client: DescribeClient) => Promise<unknown>) {
@@ -119,6 +120,25 @@ describe('schema/sdk-map.json', () => {
     expect(map.fuera['GET /names/resolve']).toBe('pendiente: par TS de DUP-01');
     expect(map.fuera['GET /names/reverse']).toBe('pendiente: par TS de DUP-01');
   });
+
+  it('/payments/status stays OUT until it asks for proof of payer (owner decision 289)', () => {
+    // Added 2026-11-17 (0.7.0). The owner decided on 2026-11-16 that this route
+    // must require proof, signed by the payer, that the asker IS the payer; it
+    // does not yet, and until it does this SDK does not wrap it. Moving it to
+    // `mapeadas` is a decision, so it has to edit this test.
+    expect(map.fuera['GET /payments/status']).toMatch(/^decisión 289 /);
+    expect(Object.keys(map.mapeadas)).not.toContain('GET /payments/status');
+  });
+
+  it('the four query forms of the metered routes are hidden by the overlay, not mapped', () => {
+    // describe-net's overlay (DN-BAZAAR-SCHEMA, 2026-10-06) marks them as
+    // strict aliases — same handler, same price — of the path forms this SDK
+    // already calls; naming both would give two methods that answer the same.
+    const classes = classify(spec, actions);
+    for (const op of ['GET /reputation/wallet', 'GET /reputation/history', 'GET /reputation/agent', 'GET /reputation/rater']) {
+      expect(classes.get(op), op).toEqual({ ignore: true });
+    }
+  });
 });
 
 describe('the watched schemas are derived from the map', () => {
@@ -128,6 +148,23 @@ describe('the watched schemas are derived from the map', () => {
       expect(watched).toContain(name);
     }
     for (const name of watched) expect(spec.components?.schemas?.[name], name).toBeDefined();
+  });
+
+  it('include what 0.7.0 types, so schema:check watches it from now on', () => {
+    // `RatingsPage` through AgentScore; the five by-resource schemas because
+    // `byResource` is in `mapeadas`. Nobody listed them: the map did.
+    const watched = watchedSchemas(spec, map);
+    for (const name of [
+      'RatingsPage',
+      'ResourceReputationResponse',
+      'ResourceReputation',
+      'ResourceCollector',
+      'ResourceAgent',
+      'ResourceReviews',
+    ]) {
+      expect(watched).toContain(name);
+    }
+    expect(watched).not.toContain('PaymentStatus');
   });
 });
 

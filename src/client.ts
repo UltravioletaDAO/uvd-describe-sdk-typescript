@@ -1,5 +1,10 @@
 /**
- * `DescribeClient` — six methods, four of which touch the network.
+ * `DescribeClient` — nine public methods, six of which touch the network.
+ *
+ * ⚠️ This line read *"six methods, four of which touch the network"* until
+ * 0.7.0, and it was already short before then: counted 2026-11-17 there were
+ * eight (`forgetAuthorization()` came with 0.6.0) and five touched the network.
+ * 0.7.0 adds `byResource()`, free.
  *
  * ## The one thing to read before changing anything here
  *
@@ -23,8 +28,8 @@
  *
  * ## 🔴 The paid routes never fail open — added 2026-08-30, and it is a money rule
  *
- * `wallet()`, `leaderboard()` and `health()` are free, so absence (2) costs
- * nothing and a `null` is the kindest answer: without it every consumer writes
+ * `wallet()`, `leaderboard()`, `health()` and `byResource()` are free, so
+ * absence (2) costs nothing and a `null` is the kindest answer: without it every consumer writes
  * the same try/catch around a lookup, which is the duplication this package
  * exists to delete.
  *
@@ -166,6 +171,7 @@ import { looksLikeSettlementReceipt, malformedHashReport, SETTLEMENT_PENDING } f
 import { jitterDelayMs, sleep } from './jitter';
 import {
   parseAgentReputation,
+  parseByResource,
   parseHealth,
   parseLeaderboard,
   parseWalletBreakdown,
@@ -173,6 +179,7 @@ import {
 } from './parse';
 import type {
   AgentReputation,
+  ByResourceReputation,
   IndexHealth,
   LeaderboardRow,
   PaymentEvidence,
@@ -1039,6 +1046,77 @@ export class DescribeClient {
   async health(): Promise<IndexHealth | null> {
     const path = '/health';
     return this.guard(path, async () => parseHealth(await this.getJson(path)));
+  }
+
+  /**
+   * `GET /reputation/by-resource` — **free**. Who collects at an x402 resource,
+   * asked by the resource's URL, and their reputation — and **not one address
+   * in the answer**, which is why a directory or a router that must never hold
+   * a payment address (Emporium, by its anti-rail rule) can ask it and store
+   * the result. Added 2026-11-17 (0.7.0); describe.net serves it since
+   * 2026-10-02 (PA-D2, describe-net #80).
+   *
+   * Pass one URL or up to describe.net's batch limit (published in its 422 as
+   * `max_urls`; not re-typed here). Each goes as its own `url=` parameter,
+   * percent-encoded, so a `&` or `#` inside a resource URL cannot cut it short.
+   * The URL is a lookup KEY, never a destination: describe.net sends nothing
+   * to it.
+   *
+   * 🔴 `resources[i]` answers `urls[i]`, and the order is the only key — no URL
+   * comes back. An answer with a different number of rows than URLs sent is
+   * refused as `unparseable` (fail-open: `null`, announced) rather than handed
+   * over for someone to zip against the wrong list.
+   *
+   * ⚠️ The tightest budget of any route: `RateLimit-Policy: 1;w=1;burst=1`,
+   * measured 2026-11-17 (the header is the authority, and `GET /health` →
+   * `by_resource` publishes the cache TTLs). Batch instead of looping: a loop
+   * of single-URL calls meets a 429, which this method returns as an
+   * announced `null`, transient.
+   *
+   * Same fail-open rules as `wallet()`: `null` = could not ask; a 422
+   * (`not_a_resource_url`, `too_many_urls`) is the caller's bug and throws. An
+   * empty list throws a `TypeError` before any request — it can only be a 422,
+   * and on this route a wasted request is a wasted second of everybody's budget.
+   *
+   * 🔴 **Deduplicate before you follow the links.** Every collector row
+   * carries an `agent`, and rows repeat it: describe.net's own listing answers
+   * six rows and ONE agent (2026-11-17). `agent()` is a PAID call, and a loop
+   * of `agent(row.agent.network, row.agent.agentId)` over the rows pays six
+   * times for one read (measured by the refuter of 0.7.0 with a spy payer: six
+   * signatures). Key by `network` AND `agentId` — an id alone is not unique
+   * across chains (see the `not_found` recovery).
+   *
+   * Three things this route inherits from the rest of the client and that
+   * read differently here:
+   *
+   *   * `error.recovery` is drawn by `kind`, for every route alike, and the
+   *     `http_5xx` / `unparseable` entries point at `GET /wallets/{wallet}/chains`
+   *     — a door for someone who holds a wallet, which a caller of this route by
+   *     definition does not. Read them as "try another route", nothing more.
+   *   * The URLs travel in the query, so they appear in `onFailure`'s `path` and
+   *     in error messages, percent-encoded — like the address does for
+   *     `wallet()`. describe.net never echoes them back; this client's logs
+   *     will. Do not ask about a URL that carries a credential.
+   *   * Percent-encoding roughly triples every `/` and `:`, so a batch of long
+   *     URLs makes a long request line. Not measured against the edge's limit;
+   *     keep batches of long URLs small.
+   */
+  async byResource(urls: string | readonly string[]): Promise<ByResourceReputation | null> {
+    const list = typeof urls === 'string' ? [urls] : [...urls];
+    if (list.length === 0) {
+      throw new TypeError('byResource() needs at least one URL: describe.net answers 422 to none');
+    }
+    const path = `/reputation/by-resource?${list.map((url) => `url=${encodeURIComponent(url)}`).join('&')}`;
+    return this.guard(path, async () => {
+      const answer = parseByResource(await this.getJson(path));
+      if (answer.resources.length !== list.length) {
+        throw new DescribeUnparseable(
+          `GET /reputation/by-resource answered ${answer.resources.length} row(s) for ${list.length} URL(s); ` +
+            'the order is the only key (no URL comes back), so no row can be attributed to a URL',
+        );
+      }
+      return answer;
+    });
   }
 
   /**
