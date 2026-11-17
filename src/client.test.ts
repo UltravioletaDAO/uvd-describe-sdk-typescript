@@ -1410,6 +1410,11 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     const again = await caughtPaid(client.walletBreakdown(KNOWN));
     expect(pay).toHaveBeenCalledTimes(1); // the clock released nothing
     expect(server.calls[2].headers['X-PAYMENT']).toBe(server.calls[1].headers['X-PAYMENT']);
+    // `first` ENDED — owed, not delivered — and this second 409 is still a
+    // payment in doubt: it must not say otherwise (c0der's round 2, P2-2a: a
+    // `delivered` that also counted an owed ending, mutant MX16, passed the
+    // suite and put "it SETTLED … not a payment in doubt" on this message).
+    expect(again.message).not.toContain('already delivered');
 
     // Somebody else's error, a non-error and a plain object drop nothing.
     expect(testClient().forgetAuthorization(again)).toBe('not-held');
@@ -1904,6 +1909,48 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(server.sends[4]).not.toBe(server.sends[0]);
   });
 
+  it('R1c — MOUNTS THE BAD STATE: two owed reads claimed ONE AT A TIME: each retry re-sends the one authorization — the payer signs once', async () => {
+    // c0der's round 2 (refuter of 6f097af8, P2-1). R1b retries both at once,
+    // so both are counted as readers before either is delivered and `readers`
+    // alone keeps the authorization held: a `join` that claimed EVERY owed
+    // read at once (`owed = 0` for `owed -= 1`, mutant MX4) passed the whole
+    // suite. With it, the first retry is delivered, nothing is owed any more,
+    // the authorization is let go, and the second retry — doing exactly what
+    // its error said — buys again: `pay` = 2, `sent[3] !== sent[0]`.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+
+    const a = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    const b = client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+    await flushTasks();
+    expect(sent).toHaveLength(2); // one signature, sent by both
+    parked[0](unconfirmed());
+    parked[1](unconfirmed()); // both reads are owed: owed = 2
+    await caughtPaid(a.then(rethrown));
+    await caughtPaid(b.then(rethrown));
+
+    for (let i = 0; i < 2; i++) {
+      // The two retries, one after the other: nobody else has it out.
+      const retry = client.walletBreakdown(KNOWN);
+      await flushTasks();
+      expect(sent[2 + i], `retry ${i + 1}`).toBe(sent[0]);
+      parked[2 + i](delivered());
+      expect((await retry).finalScore).toBe(83.0);
+    }
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(4);
+
+    // Both owed reads handed over: the books close, and the NEXT read is a
+    // new purchase.
+    const fresh = client.walletBreakdown(KNOWN);
+    await flushTasks();
+    expect(pay).toHaveBeenCalledTimes(2);
+    expect(sent[4]).not.toBe(sent[0]);
+    parked[4](delivered());
+    expect((await fresh).finalScore).toBe(83.0);
+  });
+
   it('R2 — a second call while the first is still inside payer.pay (a human approving it in PayBox) waits for THAT signature instead of asking for its own', async () => {
     // Measured on b8768b99: `R2 pay calls = 2 | sends = 2` — the second call
     // asked, was challenged and paid while the first one waited for approval.
@@ -2145,6 +2192,48 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(sent[3]).not.toBe(sent[0]);
     parked[3](delivered());
     expect(await again).toMatchObject({ finalScore: 83.0 });
+  });
+
+  it('MOUNTS THE BAD STATE: after a delivery, an owed re-send that gets a 503 is still same-header — the "already delivered" sentence and forgetAuthorization are for a 409 only', async () => {
+    // c0der's round 2 (refuter of 6f097af8, P2-2b). The 409 sentence is the
+    // only one in this SDK that says "not a payment in doubt" and names the
+    // door to a second payment. A condition that dropped `status === 409`
+    // (mutant MX10) passed the suite and put it on a 503 whose own advice
+    // says the opposite — re-send the SAME one — pushing the caller to buy
+    // again a read it is owed.
+    const { fetchImpl, parked, sent } = parkedFetch();
+    const pay = spyPayer();
+    const client = testClient({ fetchImpl, payer: { pay } });
+    const call = () => client.walletBreakdown(KNOWN).catch((e: unknown) => e);
+
+    const a = call();
+    await flushTasks();
+    const b = call();
+    await flushTasks();
+    parked[0](unconfirmed()); // `a` gets the 503: its read is owed
+    await caughtPaid(a.then(rethrown));
+    parked[1](delivered()); // `b` is delivered: `delivered` = 1, still held for `a`'s read
+    expect(await b).toMatchObject({ finalScore: 83.0 });
+
+    const late = call();
+    await flushTasks();
+    expect(sent[2]).toBe(sent[0]);
+    parked[2](reply(503, { error: 'facilitator_unavailable', retryable: true }));
+    const err = await caughtPaid(late.then(rethrown));
+    expect(err).toBeInstanceOf(DescribeHTTPError);
+    expect(err.status).toBe(503);
+    expect(err.payment.resend).toBe('same-header');
+    expect(err.message).toContain('re-sends the SAME');
+    expect(err.message).not.toContain('already delivered');
+    expect(err.message).not.toContain('forgetAuthorization');
+
+    // And it does what its advice says: the next call re-sends it and is served.
+    const retry = call();
+    await flushTasks();
+    expect(sent[3]).toBe(sent[0]);
+    parked[3](delivered());
+    expect(await retry).toMatchObject({ finalScore: 83.0 });
+    expect(pay).toHaveBeenCalledTimes(1);
   });
 
   it('MOUNTS THE BAD STATE: the free ask is never single-flight — five reads the route answers for free run side by side, and four that time out fail together', async () => {
