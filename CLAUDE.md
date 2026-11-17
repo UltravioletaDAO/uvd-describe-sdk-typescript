@@ -292,9 +292,10 @@ pay, deliberately.
    `forgetAuthorization` — a message, never a re-purchase on its own.
    That sentence is the only one here that says "not a payment in doubt", so
    its two halves are pinned from the outside (c0der's round 2): only a 409
-   carries it — a 503 after a delivery is still `same-header` and does not
-   (MX10) — and only a DELIVERED ending counts, never an owed one (MX16) nor
-   the whitelist 402 (MX16b).
+   carries it — a 503, 500, 502, 429, re-sent `payment_required` or 400 after
+   a delivery does not (MX10; a first version of the test sent only the 503
+   and kept `status !== 503` and `status < 500` alive) — and only a DELIVERED
+   ending counts, never an owed one (MX16) nor the whitelist 402 (MX16b).
 
 ## Measured traps
 

@@ -433,7 +433,11 @@ try {
   your own payer). Your `pay()` must resolve or throw: one that never settles
   leaves that resource unreadable on that client — every later call for it
   that gets a `402` times out the same way, and `forgetAuthorization()` has
-  nothing to drop, because nothing is held yet. If one of them gets a
+  nothing to drop, because nothing is held yet. A new `DescribeClient` does
+  not hold the purchase, but it is not a free way out either: it signs its
+  own, and if the old `pay()` resolves later the original call still sends
+  what it signed — two payments, one of them for a call you may have stopped
+  waiting for. If one of them gets a
   `503` and the other is delivered, the `503` one's retry re-sends the same
   authorization: its read was paid, and describe.net serves it again from its
   receipt (*"re-send the same header to the request you signed it for"*,

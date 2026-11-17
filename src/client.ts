@@ -785,14 +785,18 @@ function adviceAfterPaying(attempt: PaymentAttempt): string {
       );
     }
     case 'reconcile':
+      // ⚠️ Until c0der's round 2 (P3 of this round's own refuter) the
+      // parenthesis read *"(past `error.payment.validBefore`)"* — the same
+      // threshold, short of the clock margin, that the round corrected in
+      // `ALREADY_DELIVERED_409`; with both on one 409 the message gave two.
       return (
         'That authorization may already have moved money, and re-sending it will not change this ' +
         'answer: read `error.payment.nextAction` and look on-chain for the transfer to `payTo` ' +
         'before paying for this resource again (`error.payment.nonce` on `error.payment.network` ' +
         'is what identifies it). Calling this method again re-sends the same authorization, never ' +
-        'a new one. Only once it can no longer execute (past `error.payment.validBefore`) AND no ' +
-        'transfer of it is on-chain does `forgetAuthorization(error)` let the next call buy the ' +
-        'read again.'
+        'a new one. Only once it can no longer execute (past `error.payment.validBefore` plus ' +
+        '`AUTHORIZATION_EXPIRY_MARGIN_SECONDS`) AND no transfer of it is on-chain does ' +
+        '`forgetAuthorization(error)` let the next call buy the read again.'
       );
     case 'new-challenge-ok':
       return (
