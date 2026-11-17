@@ -324,6 +324,8 @@ function parseRatingsPage(v: unknown): RatingsPage | null {
   const nextOffset = optCount(v.next_offset);
   if (offset === null || returned === null) return null;
   if ((v.limit !== null && limit === null) || (v.next_offset !== null && nextOffset === null)) return null;
+  // The route takes `limit` 1..200 (`minimum: 1` in the schema): a declared `0` is not a page size.
+  if (limit === 0) return null;
   return { offset, limit, returned, nextOffset };
 }
 

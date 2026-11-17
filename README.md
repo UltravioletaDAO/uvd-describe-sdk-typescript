@@ -1013,6 +1013,8 @@ if (answer === null) {
 * `no_erc8004_identity` is **not** bad reputation, and only `found` describes
   collectors: `lookup_truncated` is not proof of absence and
   `bazaar_unavailable` means ask again.
+* **An empty list throws** a `TypeError` before any request, `failOpen` or not —
+  it is your bug, not their outage. Guard a list you build dynamically.
 * **Batch, do not loop.** The route allows one request per second
   (`RateLimit-Policy: 1;w=1;burst=1`, measured 2026-11-17); a loop of single
   lookups meets a 429, which comes back as an announced `null`.

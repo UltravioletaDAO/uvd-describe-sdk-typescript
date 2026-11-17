@@ -89,6 +89,7 @@ describe('ratings_total and ratings_page are typed as what they are', () => {
       { offset: 1.5, limit: null, returned: 2, next_offset: null },
       { offset: 0, limit: null, returned: '2', next_offset: null },
       { offset: 0, limit: null, returned: 2, next_offset: 'end' },
+      { offset: 0, limit: 0, returned: 0, next_offset: null },
     ]) {
       expect(parseAgentReputation({ ...UNPAGED, ratings_page: partial }, null).ratingsPage, JSON.stringify(partial)).toBeNull();
     }

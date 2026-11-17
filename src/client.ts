@@ -1096,8 +1096,7 @@ export class DescribeClient {
    *   * The URLs travel in the query, so they appear in `onFailure`'s `path` and
    *     in error messages, percent-encoded — like the address does for
    *     `wallet()`. describe.net never echoes them back; this client's logs
-   *     will. Do not ask about a URL that carries a credential (it would not be
-   *     a bazaar listing anyway: the match is exact).
+   *     will. Do not ask about a URL that carries a credential.
    *   * Percent-encoding roughly triples every `/` and `:`, so a batch of long
    *     URLs makes a long request line. Not measured against the edge's limit;
    *     keep batches of long URLs small.

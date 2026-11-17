@@ -629,7 +629,11 @@ export interface ResourceCollector {
   identityStatus: 'erc8004_identity' | 'no_erc8004_identity' | 'not_indexed' | (string & {});
   /** `null` when nothing was asked (`not_indexed`), never `false`. */
   hasIdentity: boolean | null;
-  /** ERC-8004 identities the collector holds across the indexed chains. `null` when nothing was asked, never `0`. */
+  /**
+   * ERC-8004 identities the collector holds across the indexed chains. `null`
+   * when nothing was asked (`not_indexed`) — never `0` for that; a collector that
+   * WAS asked and holds none is `0`, a different fact.
+   */
   identityCount: number | null;
   /**
    * ONE identity to link — not necessarily the most-reviewed one; `identityCount`
