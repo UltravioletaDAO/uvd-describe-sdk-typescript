@@ -16,9 +16,12 @@ commits, so they are shorter than they deserve — `git log` has the measurement
 
 ## 0.6.0 — 2026-11-16 (not published yet)
 
-The npm release after 0.5.0. 0.5.0 is on npm since 2026-11-16T17:14:31Z,
-published by trusted publishing from `main` 4c45fb3 (`publish.yml` run
-43915333255, `workflow_dispatch`, success) — that build already carried the
+The npm release after 0.5.0. 0.5.0 is on npm since 2026-11-16: `publish.yml`
+run 43915333255 logged `+ uvd-describe-sdk@0.5.0` at 17:11:52Z, and the
+registry stamps the version 17:14:31Z (`time["0.5.0"]` of
+`https://registry.npmjs.org/uvd-describe-sdk`, read without a token). It was
+published by trusted publishing from `main` 4c45fb3 (that run,
+`workflow_dispatch`, success) — that build already carried the
 DN-PUB-01 change listed under "Unreleased" below, which changes no shipped
 code (its workflows, its test and `CLAUDE.md` are not in the tarball; only its
 entry in this file is).
@@ -29,6 +32,13 @@ the DN-PUB-01 change listed under "Unreleased" below, which landed on `main`
 after 0.5.0 without a bump. 0.5.0 was never published either, so the first npm
 release after 0.4.1 is this one."* It was written before that run, and 0.5.0
 went out two hours before this change was proposed.
+
+⚠️ And corrected again in c0der's round 2 (P3): the first sentence read
+*"0.5.0 is on npm since 2026-11-16T17:14:31Z"* — the registry's stamp alone,
+which that round's refuter could not reproduce from the run (it did not query
+the registry: `npm view` sends an `.npmrc` token if there is one) and which is
+2 min 39 s after the run's own `+ uvd-describe-sdk@0.5.0` line. Both are quoted
+now, each with where it can be read.
 
 ### Fixed — after paying, calling again re-sends the authorization instead of signing a second one (F-A2) [money]
 
@@ -179,7 +189,7 @@ it.
   check comes back or goes away. CI on `push` now runs only when a file it reads
   changes.
 
-## 0.5.0 — 2026-09-30 (on npm since 2026-11-16T17:14:31Z; this heading read "not published yet" until then)
+## 0.5.0 — 2026-09-30 (on npm since 2026-11-16: 17:11:52Z in the publish log, 17:14:31Z in the registry; this heading read "not published yet" until then)
 
 ### Added — `uvd-describe-sdk/widget`
 
