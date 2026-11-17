@@ -2182,6 +2182,9 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect(err.payment.resend).toBe('reconcile');
     expect(err.message).toContain('already delivered a read paid with this authorization');
     expect(err.message).toContain('forgetAuthorization(error)');
+    // c0der's round 2 (P3): the condition it names is the one
+    // `forgetAuthorization` applies — the clock margin, not bare `validBefore`.
+    expect(err.message).toContain('`validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` has passed');
     expect(pay).toHaveBeenCalledTimes(1);
 
     // The way out works as the message says: forgotten, and the next call buys.
@@ -2305,6 +2308,10 @@ describe('tras pagar — the authorization is re-sent, never signed twice (F-A2)
     expect((waited as DescribeError).kind).toBe('timeout');
     expect(failedAfterPaying(waited)).toBe(false); // it sent nothing and paid nothing
     expect((waited as Error).message).toContain('sent nothing');
+    // And where the way out is NOT (c0der's round 2, P3): nothing is held yet.
+    expect((waited as Error).message).toContain('Until that payer resolves or throws');
+    expect((waited as Error).message).toContain('`forgetAuthorization()` has nothing to drop');
+    expect(client.forgetAuthorization(waited, { force: true })).toBe('not-held');
     expect(pay).toHaveBeenCalledTimes(1);
     expect(server.sends).toHaveLength(0);
 

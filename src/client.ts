@@ -735,12 +735,21 @@ const HEADER_REDACTED = '[x-payment-redacted]';
  * its own is paying a second time as a REFLEX, which `forgetAuthorization()`
  * exists to make a decision. The 409 stays typed (`DescribeHTTPError`, status
  * 409, `payment.resend: 'reconcile'`); this sentence names the way out.
+ *
+ * ⚠️ Until c0der's round 2 (P3 of its refuter on 6f097af8) the last clause
+ * read *"past `validBefore` it answers `forgotten`"*. `forgetAuthorization()`
+ * answers that only past `validBefore` + `AUTHORIZATION_EXPIRY_MARGIN_SECONDS`
+ * with no other call reading it, and never without `force` when `validBefore`
+ * could not be read — a caller who took the old wording at its word got
+ * `'may-still-execute'` for 15 s and did not know why.
  */
 const ALREADY_DELIVERED_409 =
   ' This client already delivered a read paid with this authorization, so it SETTLED and this ' +
   '409 is describe.net no longer serving that read again (its receipt window is over), not a ' +
-  'payment in doubt. To buy the read again, call `forgetAuthorization(error)`: past ' +
-  '`validBefore` it answers `forgotten` and the next call signs a new authorization.';
+  'payment in doubt. To buy the read again, call `forgetAuthorization(error)`: once ' +
+  '`validBefore` plus `AUTHORIZATION_EXPIRY_MARGIN_SECONDS` has passed and no other call has it ' +
+  'out, it answers `forgotten` (an unreadable `validBefore` needs `{ force: true }`) and the ' +
+  'next call signs a new authorization.';
 
 /**
  * Below this length a "header" is not an x402 envelope (a real one is a
@@ -1531,10 +1540,19 @@ export class DescribeClient {
     // both worlds.
     if (acquiring.outcome !== undefined) return acquiring.outcome;
     acquiring.waiting -= 1;
+    // The last sentence since c0der's round 2 (P3 of its refuter on 6f097af8,
+    // probe X2: `timeout`, `timeout`, `timeout`, `pay` = 1, and
+    // `forgetAuthorization` → `'not-held'`): a `pay()` that never settles
+    // leaves this resource unreadable on this client, and nothing here can
+    // let go of a purchase still inside the caller's payer — so the message
+    // says where the way out is instead of letting "call again" read as one.
     throw new DescribeTimeout(
       `GET ${path}: another call has been buying the authorization for this resource for ` +
         `${this.timeoutMs} ms and its payer has not answered. This call sent nothing and paid ` +
-        'nothing; calling again waits for that signature again, or sends it once it is held.',
+        'nothing; calling again waits for that signature again, or sends it once it is held. ' +
+        'Until that payer resolves or throws, every call for this resource on this client ends ' +
+        'like this one, and `forgetAuthorization()` has nothing to drop: no authorization is ' +
+        'held yet.',
     );
   }
 
